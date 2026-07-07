@@ -1,11 +1,30 @@
 # TANK
 
 Realtime multiplayer tank arena for mobile: **tilt your phone to drive, touch to aim & shoot**.
-Up to 8 players per room, instant respawns, bouncing shells.
+Up to 8 players per room, instant respawns, bouncing shells. Ships as a **Usion
+direct-mode game** — identity, rooms, and invites come from the platform; the
+client talks binary WebSocket straight to this authoritative server (zero relay hop).
 
-- **Play**: open the Vercel URL on your phone, tap PLAY (grants motion access on iOS), tilt to move.
-- **Rooms**: share `?room=<anything>` to play in a private arena (default room: `arena`).
+- **Play**: launch from the Usion app (a game invite in chat, or Explore). Tap PLAY
+  (grants motion access on iOS), then tilt to drive and touch to shoot. A solo
+  Explore launch drops you into a local practice arena until you invite friends
+  (host **Share** button) — then it promotes into a live match.
 - **Fallbacks**: no tilt sensor → virtual joystick (left half of screen); desktop → WASD/arrows + mouse.
+
+## Usion integration — direct mode
+
+The game runs inside the Usion host (WebView/iframe). At boot it calls
+`Usion.init`, reads identity (`Usion.user.getId/getName`) and the room
+(`Usion.config.roomId`), then fetches a short-lived **RS256 access token** from
+the backend via the SDK (`Usion.game._fetchDirectAccess`, host-proxied so there
+is no CORS/PNA issue) and opens its OWN binary WebSocket to this server with
+`?token=<jwt>`. The server validates the token against the platform JWKS
+(`server/auth.js`) and binds the connection to the token's user + room — the
+client can pick neither, which is what makes it cheating-resistant. Registered in
+the service registry with `realtime.connection_mode: "direct"` (see
+`backend/scripts/seed_tank.py` in the monorepo). Opened OUTSIDE the host it falls
+back to a `dev:<user>:<room>` token, accepted only when the server runs with
+`DEV_ALLOW_UNSIGNED=1` (the process refuses to boot with that set in production).
 
 ## Architecture — the zero-lag template
 
@@ -64,13 +83,22 @@ The client auto-connects to `ws://localhost:8080` on localhost, or use `?server=
 
 ## Deploy
 
-```bash
-# server → Railway
-railway up --detach       # railway.json sets start command + /healthz
+The Railway server serves the static client too (one host for both the iframe
+and the WebSocket), so a single deploy ships everything:
 
-# client → Vercel (set PROD_SERVER_URL in client/js/config.js to the Railway wss:// domain first)
-cd client && vercel deploy --prod
+```bash
+# server + client → Railway
+railway up --detach        # railway.json sets start command + /healthz
+# NODE_ENV=production is set on the service; DEV_ALLOW_UNSIGNED must stay UNSET.
+
+# register / update in the Usion service registry (from the monorepo backend)
+cd backend && python -m scripts.seed_tank
 ```
+
+`iframe_url` and `realtime.ws_url` both point at the Railway domain
+(`https://…/` and `wss://…/ws`). Standalone hosting on Vercel still works if you
+prefer to split them — set `DEV_SERVER_URL` in `client/js/config.js` to the
+Railway `wss://…/ws` domain and `vercel deploy --prod` the `client/` dir.
 
 ## Future upgrades
 

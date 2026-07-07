@@ -5,10 +5,12 @@
 import { MSG, DT, decodeSnapshot, decodePong, encodeInput, encodePing } from '../shared/protocol.js';
 
 export class Net {
-  constructor(url, { name, room, onSnapshot, onEvent, onStatus }) {
-    this.url = url;
+  // `resolveUrl` is an async () => wsUrl-with-token, called on every (re)connect
+  // so a fresh access token is minted each time — platform tokens are short
+  // lived (~30 min) and a long match can reconnect after that.
+  constructor(resolveUrl, { name, onSnapshot, onEvent, onStatus }) {
+    this.resolveUrl = resolveUrl;
     this.name = name;
-    this.room = room;
     this.onSnapshot = onSnapshot;
     this.onEvent = onEvent;       // (jsonMsg) => void
     this.onStatus = onStatus;     // ('connecting'|'connected'|'reconnecting') => void
@@ -26,7 +28,16 @@ export class Net {
 
   connect() {
     this.onStatus(this._clockInit ? 'reconnecting' : 'connecting');
-    const ws = new WebSocket(this.url);
+    // Resolve a fresh tokenized URL, then open. A failed token fetch (backend
+    // hiccup, expired session) is treated like a dropped socket: back off + retry.
+    Promise.resolve()
+      .then(() => this.resolveUrl())
+      .then((url) => { if (!this.closedByUs) this._open(url); })
+      .catch(() => this._scheduleReconnect());
+  }
+
+  _open(url) {
+    const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
@@ -36,7 +47,7 @@ export class Net {
       // restarted server's tick time can be far BELOW the old estimate, and
       // the EMA only corrects downward slowly
       this._clockInit = false;
-      ws.send(JSON.stringify({ t: 'hello', name: this.name, room: this.room }));
+      ws.send(JSON.stringify({ t: 'hello', name: this.name }));
       this._pingTimer = setInterval(() => {
         if (ws.readyState === 1) ws.send(encodePing(performance.now()));
       }, 2000);
@@ -67,11 +78,16 @@ export class Net {
       this.connected = false;
       clearInterval(this._pingTimer);
       if (this.closedByUs) return;
-      this.onStatus('reconnecting');
-      setTimeout(() => this.connect(), this.backoff);
-      this.backoff = Math.min(5000, this.backoff * 1.7);
+      this._scheduleReconnect();
     };
     ws.onerror = () => { /* onclose follows */ };
+  }
+
+  _scheduleReconnect() {
+    if (this.closedByUs) return;
+    this.onStatus('reconnecting');
+    setTimeout(() => this.connect(), this.backoff);
+    this.backoff = Math.min(5000, this.backoff * 1.7);
   }
 
   // EMA of (snapshot server-time − local arrival time). Snapshot cadence is one

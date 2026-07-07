@@ -15,8 +15,9 @@ import {
   MAX_PLAYERS_PER_ROOM, decodeInput, encodeSnapshot, encodePong,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, SPAWN_POINTS, OBSTACLES } from '../client/shared/sim.js';
+import { validateAccessToken } from './auth.js';
+import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS } from './config.js';
 
-const PORT = process.env.PORT || 8080;
 const MAX_CONNS = 128;
 const MAX_ROOMS = 32;
 const INPUT_QUEUE_CAP = 6;      // jitter buffer cap; beyond this old inputs are dropped
@@ -222,25 +223,48 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 2048 });
 
-// Optional browser-origin allowlist (comma-separated). Unset = allow all —
-// non-browser clients (bots, tests) send no Origin and are always allowed.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
-
 wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CONNS) { ws.close(1013, 'server full'); return; }
   const origin = req.headers.origin;
+  // Browser clients send an Origin; non-browser clients (tests) send none and
+  // are always allowed. Unset ALLOWED_ORIGINS = allow all.
   if (ALLOWED_ORIGINS.length && origin && !ALLOWED_ORIGINS.includes(origin)) { ws.close(4003, 'origin not allowed'); return; }
   req.socket.setNoDelay(true);
 
   let player = null;
   let room = null;
+  let auth = null;                 // validated token claims: {sub, room_id, session_id, name}
   let lastMsgAt = Date.now();
+  const preAuthBuffer = [];        // frames that arrive before token validation resolves
 
-  const helloTimer = setTimeout(() => { if (!player) ws.close(4000, 'hello timeout'); }, HELLO_TIMEOUT_MS);
+  // Every direct-mode connection must present a platform-minted access token in
+  // the query string (?token=). Validate it BEFORE trusting any frame. The
+  // token binds the connection to a user (sub) and a room (room_id) — the
+  // client cannot pick either, which is what makes this cheating-resistant.
+  let token = '';
+  try { token = new URL(req.url, 'http://localhost').searchParams.get('token') || ''; } catch { /* keep '' */ }
 
   ws.on('message', (data, isBinary) => {
+    if (!auth) {
+      // Buffer a couple of frames (the client sends `hello` immediately on open,
+      // which can beat async token validation). Drop the rest to bound memory.
+      if (preAuthBuffer.length < 4) preAuthBuffer.push([data, isBinary]);
+      return;
+    }
     try { handleMessage(data, isBinary); } catch { /* a bad frame must never take the server down */ }
   });
+
+  validateAccessToken(token, { jwksUrl: JWKS_URL, serviceId: SERVICE_ID })
+    .then((claims) => {
+      if (ws.readyState !== 1) return;             // client gave up during validation
+      auth = claims;
+      // Flush anything that arrived while we were verifying, in order.
+      const buffered = preAuthBuffer.splice(0);
+      for (const [d, b] of buffered) { try { handleMessage(d, b); } catch { /* ignore */ } }
+    })
+    .catch(() => { try { ws.close(4002, 'invalid token'); } catch { /* already closed */ } });
+
+  const helloTimer = setTimeout(() => { if (!player) ws.close(4000, 'hello timeout'); }, HELLO_TIMEOUT_MS);
 
   function handleMessage(data, isBinary) {
     lastMsgAt = Date.now();
@@ -251,17 +275,28 @@ wss.on('connection', (ws, req) => {
       try { msg = JSON.parse(data.toString().slice(0, 512)); } catch { return; }
       if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return; // JSON.parse('null') etc.
       if (msg.t === 'hello' && !player) {
-        const roomId = String(msg.room || 'arena').replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'arena';
-        const name = String(msg.name || 'tank').replace(/[<>&"']/g, '').trim().slice(0, 12) || 'tank';
+        // Room + identity come from the TOKEN, never the client. The display
+        // name is the only client-supplied field (cosmetic) — sanitized, and it
+        // falls back to the token's name claim / user id.
+        const roomId = auth.room_id;
+        const name = String(msg.name || auth.name || 'tank').replace(/[<>&"']/g, '').trim().slice(0, 16) || 'tank';
         const r = getRoom(roomId);
         if (!r) { ws.send(JSON.stringify({ t: 'error', reason: 'server full' })); ws.close(1013); return; }
+        // A user reconnecting (new socket, same token identity) must not occupy
+        // two slots — retire any prior tank they hold in this room first.
+        for (const [pid, existing] of [...r.players]) {
+          if (existing.userId === auth.sub) {
+            r.players.delete(pid);
+            try { existing.ws.close(4008, 'replaced by newer session'); } catch { /* already gone */ }
+          }
+        }
         const id = r.freeId();
         if (!id) { ws.send(JSON.stringify({ t: 'error', reason: 'room full' })); ws.close(4001); return; }
         clearTimeout(helloTimer);
         room = r;
         const s = pickSpawn(room);
         player = {
-          id, name, ws,
+          id, userId: auth.sub, name, ws,
           tank: makeTank(id, s.x, s.y),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
           nextFireAt: -10, respawnAt: 0,

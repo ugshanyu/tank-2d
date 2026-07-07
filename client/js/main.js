@@ -1,81 +1,173 @@
-// Boot + game loop. Fixed-tick accumulator (60 Hz) drives input/prediction;
-// rendering runs every animation frame with interpolation.
+// Boot + game loop. Runs inside the Usion host (identity + rooms + direct-mode
+// access come from the SDK) and also standalone in a plain browser (dev token).
+// Fixed-tick accumulator (60 Hz) drives input/prediction; rendering runs every
+// animation frame with interpolation.
 
-import { serverUrl, roomId } from './config.js';
-import { DT } from '../shared/protocol.js';
+import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
+import { DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
 import { Game } from './game.js';
 import { Renderer, colorFor } from './render.js';
+import { makeTank, stepTank, stepBullet, SPAWN_POINTS } from '../shared/sim.js';
 
 const canvas = document.getElementById('game');
 const $ = (id) => document.getElementById(id);
 
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
+
+// resolved once the SDK (or its absence) settles
+const me = { userId: null, userName: '', embedded: false, roomId: null };
 let net = null;
 let game = null;
+let netStarted = false;
+let started = false;              // PLAY tapped
 
-// ---- start overlay ----
-const nameEl = $('name');
-nameEl.value = localStorage.getItem('tank_name') || '';
+// ---------------------------------------------------------------- Usion boot --
+function boot() {
+  const U = window.Usion;
+  if (U && typeof U.init === 'function') {
+    let done = false;
+    const ready = (config) => {
+      if (done) return; done = true;
+      try {
+        me.userId = (U.user && U.user.getId && U.user.getId()) || null;
+        me.userName = (U.user && U.user.getName && U.user.getName()) || '';
+        me.embedded = !!U._isEmbedded;
+        me.roomId = (U.config && U.config.roomId) || (config && config.roomId) || null;
+        // Solo → host promotion: a solo Explore launch becomes a live match when
+        // the user taps the host's Share button. The SDK sets roomId/mode and we
+        // connect for real. Register up front, even on a single launch.
+        if (U.game && U.game.onRoomAssigned) {
+          U.game.onRoomAssigned((info) => onRoomAssigned((info && info.roomId) || (U.config && U.config.roomId)));
+        }
+      } catch { /* fall through to whatever identity we have */ }
+      onReady();
+    };
+    U.init(ready);
+    // Guard: if init never fires (SDK script present but host silent), start
+    // standalone rather than hang on the overlay forever.
+    setTimeout(() => ready(null), 3000);
+  } else {
+    onReady(); // no SDK at all → pure standalone
+  }
+}
 
-let started = false;
+function onReady() {
+  const who = $('whoami');
+  if (who) {
+    who.textContent = me.userName
+      ? `Playing as ${me.userName}`
+      : (me.embedded ? '' : 'Guest');
+  }
+  wirePlay();
+}
+
+// -------------------------------------------------------------- start overlay --
 let wakeLock = null;
 async function acquireWakeLock() {
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
 }
 
-$('play').addEventListener('click', async () => {
-  if (started) return; // double-tap would spawn a second session
-  started = true;
-  const name = (nameEl.value.trim() || 'tank-' + Math.floor(Math.random() * 99));
-  localStorage.setItem('tank_name', name);
+function wirePlay() {
+  const playBtn = $('play');
+  if (!playBtn || playBtn.__wired) return;
+  playBtn.__wired = true;
 
-  // must happen inside the tap gesture (iOS)
-  const tilt = await input.requestTilt();
-  if (tilt === 'granted') {
-    $('calibrate').style.display = 'block';
-    toast('Tilt enabled — hold your phone level, then tilt to drive');
-  } else if (tilt === 'denied') {
-    toast('Motion access denied — using touch joystick');
-  }
+  playBtn.addEventListener('click', async () => {
+    if (started) return; // double-tap would spawn a second session
+    started = true;
 
-  try { await document.documentElement.requestFullscreen?.(); } catch { /* iOS Safari: no fullscreen API */ }
-  await acquireWakeLock();
+    // Motion permission MUST be requested inside this tap gesture (iOS 13+).
+    const tilt = await input.requestTilt();
+    if (tilt === 'granted') {
+      $('calibrate').style.display = 'block';
+      toast('Tilt enabled — hold your phone level, then tilt to drive');
+    } else if (tilt === 'denied') {
+      toast('Motion access denied — using touch joystick');
+    }
 
-  $('start').style.display = 'none';
-  start(name);
-});
+    // Cosmetic, best-effort — never block entering the game on these.
+    try { document.documentElement.requestFullscreen?.().catch(() => {}); } catch { /* iOS/iframe: no fullscreen */ }
+    acquireWakeLock();
 
-// wake locks are released when the page is hidden — take it back on return
+    $('start').style.display = 'none';
+    connectAndPlay();
+  });
+
+  $('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
+}
+
+// wake locks release when the page hides — take it back on return
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && started) acquireWakeLock();
 });
 
-$('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
-
 let toastTimer = 0;
 function toast(text, ms = 2200) {
   const el = $('toast');
+  if (!el) return;
   el.textContent = text;
   el.style.opacity = 1;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.style.opacity = 0; }, ms);
 }
 
-// ---- connection + loop ----
-function start(name) {
-  let url;
-  try { url = serverUrl(); } catch (e) { toast(e.message, 10000); throw e; }
+// ------------------------------------------------------------- mode selection --
+function connectAndPlay() {
+  if (me.embedded && me.roomId) {
+    startNet(() => platformUrl(me.roomId));           // real multiplayer match
+  } else if (me.embedded && !me.roomId) {
+    startSoloPractice();                              // solo Explore launch
+    toast('Practice mode — tap Share above to battle friends', 3400);
+  } else {
+    startNet(() => Promise.resolve(devUrl()));         // standalone / local dev
+  }
+}
+
+// Fetch a fresh direct-mode access token from the platform and return the WS URL
+// with the token attached. Called on every (re)connect (tokens are short-lived).
+async function platformUrl(roomId) {
+  const access = await window.Usion.game._fetchDirectAccess({
+    roomId, serviceId: SERVICE_ID, protocolVersion: '2',
+  });
+  if (!access || !access.ws_url || !access.access_token) throw new Error('bad access payload');
+  const sep = access.ws_url.indexOf('?') === -1 ? '?' : '&';
+  return `${access.ws_url}${sep}token=${encodeURIComponent(access.access_token)}`;
+}
+
+function devUrl() {
+  const room = devRoomId();
+  const uid = String(me.userId || `guest-${Math.floor(Math.random() * 9999)}`).replace(/[^\w-]/g, '-');
+  const token = `dev:${uid}:${room}`;
+  const base = devServerUrl();
+  const sep = base.indexOf('?') === -1 ? '?' : '&';
+  return `${base}${sep}token=${encodeURIComponent(token)}`;
+}
+
+function onRoomAssigned(roomId) {
+  if (!roomId || netStarted) return;
+  me.roomId = roomId;
+  stopSoloPractice();
+  $('start').style.display = 'none';
+  toast('Match starting…', 1600);
+  startNet(() => platformUrl(roomId));
+}
+
+// -------------------------------------------------------- multiplayer session --
+function startNet(resolveUrl) {
+  if (netStarted) return;
+  netStarted = true;
+  stopSoloPractice();
+
   game = new Game(null); // net assigned below (Net calls back immediately)
-  net = new Net(url, {
-    name,
-    room: roomId(),
+  net = new Net(resolveUrl, {
+    name: me.userName || 'tank',
     onSnapshot: (s) => game.onSnapshot(s),
     onEvent: (m) => {
       game.onEvent(m);
-      if (m.t === 'welcome') toast(`Joined arena "${m.room}" — ${m.players.length} tank(s)`, 1800);
+      if (m.t === 'welcome') toast(`In the arena — ${m.players.length} tank(s)`, 1600);
       if (m.t === 'join' && m.id !== game.myId) toast(`${m.name} joined`, 1400);
       if (m.t === 'death' && m.victim !== game.myId && m.killer === game.myId) toast('Kill! +1', 1200);
       if (m.t === 'error') toast(m.reason, 4000);
@@ -129,7 +221,7 @@ function start(name) {
     renderer.draw({
       me: game.meServer,
       meId: game.myId,
-      meName: game.names.get(game.myId) || '',
+      meName: game.names.get(game.myId) || me.userName || '',
       mePos: game.me ? { x: game.me.x + game.errX + game.me.vx * acc, y: game.me.y + game.errY + game.me.vy * acc, hull: game.me.hull } : null,
       aimAngle,
       others: game.remoteStates(renderMs),
@@ -143,7 +235,7 @@ function start(name) {
 
   setInterval(() => {
     const el = $('pingv');
-    if (el && net) el.textContent = `${net.rtt} ms · ${roomId()}`;
+    if (el && net) el.textContent = `${net.rtt} ms`;
   }, 500);
 }
 
@@ -165,4 +257,78 @@ function updateHud() {
   }
 }
 
+// ------------------------------------------------------------- solo practice --
+// No server: a single local tank driven by the same shared sim, so a solo
+// Explore launch is instantly playable (feel the tilt + fire) while waiting to
+// be promoted into a real match via the host's Share button (onRoomAssigned).
+let soloActive = false;
+let soloRAF = 0;
+function startSoloPractice() {
+  if (soloActive || netStarted) return;
+  soloActive = true;
+  $('start').style.display = 'none';
+  $('scores').innerHTML = '';
+  $('status').innerHTML = '<span>practice</span>';
+
+  const spawn = SPAWN_POINTS[0];
+  const tank = makeTank(1, spawn.x, spawn.y);
+  const bullets = [];
+  const effects = [];
+  let nextFireAt = -10;
+  let last = performance.now();
+  let acc = 0;
+
+  function frame(now) {
+    if (!soloActive) return;
+    soloRAF = requestAnimationFrame(frame);
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.25) { dt = 0; acc = 0; }
+
+    input.poll();
+    let aim = tank.turret;
+    if (input.hasAim) {
+      const w = renderer.screenToWorld(input.aimScreen.x, input.aimScreen.y);
+      aim = Math.atan2(w.y - tank.y, w.x - tank.x);
+    }
+
+    acc += dt;
+    if (acc > DT * 6) acc = DT;
+    while (acc >= DT) {
+      acc -= DT;
+      stepTank(tank, { moveX: input.moveX, moveY: input.moveY }, DT);
+      tank.turret = aim;
+      const t = now / 1000;
+      if (input.firing && t >= nextFireAt) {
+        nextFireAt = t + FIRE_COOLDOWN;
+        const bx = tank.x + Math.cos(aim) * MUZZLE_OFFSET;
+        const by = tank.y + Math.sin(aim) * MUZZLE_OFFSET;
+        bullets.push({ x: bx, y: by, vx: Math.cos(aim) * BULLET_SPEED, vy: Math.sin(aim) * BULLET_SPEED, age: 0, bounces: 0 });
+        effects.push({ kind: 'muzzle', x: bx, y: by, a: aim, born: performance.now(), dur: 90 });
+      }
+      for (let i = bullets.length - 1; i >= 0; i--) if (!stepBullet(bullets[i], DT)) bullets.splice(i, 1);
+    }
+
+    const n = performance.now();
+    for (let i = effects.length - 1; i >= 0; i--) if (n - effects[i].born > effects[i].dur) effects.splice(i, 1);
+
+    renderer.draw({
+      me: tank, meId: 1, meName: me.userName || 'you',
+      mePos: { x: tank.x + tank.vx * acc, y: tank.y + tank.vy * acc, hull: tank.hull },
+      aimAngle: aim,
+      others: [],
+      bullets: bullets.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy })),
+      effects,
+    });
+  }
+  soloRAF = requestAnimationFrame(frame);
+}
+
+function stopSoloPractice() {
+  soloActive = false;
+  if (soloRAF) cancelAnimationFrame(soloRAF);
+  soloRAF = 0;
+}
+
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+boot();

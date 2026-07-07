@@ -45,9 +45,7 @@
   #start h1 { font-size: 44px; letter-spacing: 10px; margin-bottom: 4px; color: #8be9fd;
     text-shadow: 0 0 26px rgba(139,233,253,.35); }
   #start p { color: #9fb4d0; font-size: 14px; margin-bottom: 22px; }
-  #name { width: 100%; padding: 13px 16px; font-size: 16px; border-radius: 12px;
-    border: 1px solid #2c3f5e; background: #101828; color: #e8eef7; text-align: center;
-    outline: none; margin-bottom: 14px; }
+  #whoami { color: #8be9fd; font-size: 14px; font-weight: 600; margin-bottom: 16px; min-height: 18px; }
   #play { width: 100%; padding: 15px; font-size: 18px; font-weight: 800; letter-spacing: 3px;
     border: none; border-radius: 12px; background: linear-gradient(180deg, #35c3ef, #1f8fd6);
     color: #06131f; cursor: pointer; }
@@ -70,12 +68,15 @@
   <div class="card">
     <h1>TANK</h1>
     <p>Tilt your phone to drive.<br>Touch anywhere to aim &amp; shoot.</p>
-    <input id="name" maxlength="12" placeholder="your name" autocomplete="off">
+    <div id="whoami"></div>
     <button id="play">PLAY</button>
     <div class="hint">No tilt sensor? You get a joystick (left half) —<br>or WASD + mouse on desktop.</div>
   </div>
 </div>
 
+<!-- Usion platform SDK: injected identity, wallet, rooms, direct-mode access.
+     No-ops gracefully when opened outside the Usion host (standalone/dev). -->
+<script src="https://usions.com/usion-sdk.js"></script>
 <script type="module" src="js/main.js"></script>
 </body>
 </html>

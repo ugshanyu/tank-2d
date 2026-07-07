@@ -29,11 +29,17 @@ class Bot {
   }
   connect(room = 'smoke') {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(URL);
+      // Direct-mode auth: every socket presents a token. In the test the server
+      // runs with DEV_ALLOW_UNSIGNED=1, which accepts `dev:<userId>:<roomId>`.
+      // The room + identity are taken from the TOKEN server-side; the hello
+      // frame now carries only the (cosmetic) display name.
+      const userId = this.name.replace(/[^\w-]/g, '-');
+      const token = `dev:${userId}:${room}`;
+      const ws = new WebSocket(`${URL}/ws?token=${encodeURIComponent(token)}`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const to = setTimeout(() => reject(new Error('connect timeout')), 4000);
-      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name, room })));
+      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name })));
       ws.on('message', (data, isBinary) => {
         if (!isBinary) {
           const msg = JSON.parse(data.toString());
@@ -69,7 +75,7 @@ class Bot {
 async function main() {
   console.log('starting server…');
   const srv = spawn('node', ['server/server.js'], {
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', DEV_ALLOW_UNSIGNED: '1' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   await new Promise((resolve, reject) => {
