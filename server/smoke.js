@@ -105,7 +105,7 @@ async function main() {
     check((A.snap?.tick ?? 0) > tickBefore, 'server still ticking after malformed frames');
 
     // ---- movement + acks ----
-    await A.drive(36, 1, 0); // ~1.2 s driving right
+    await A.drive(Math.round(1.2 / DT), 1, 0); // ~1.2 s driving right (tick-rate agnostic)
     await sleep(120);
     const a1 = A.me();
     check(a1.x - a0.x > 200, `A moved right by ${Math.round(a1.x - a0.x)}px (>200)`);

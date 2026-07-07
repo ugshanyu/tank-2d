@@ -1,5 +1,5 @@
 // TANK — authoritative realtime server.
-// Fixed 30 Hz simulation. Clients send binary INPUT packets (seq-numbered); the
+// Fixed 60 Hz simulation. Clients send binary INPUT packets (seq-numbered); the
 // server simulates every tank with the shared sim code, acks the last processed
 // seq in each binary SNAPSHOT, and emits infrequent events (fire/death/join) as JSON.
 // Latency hygiene: TCP_NODELAY on, permessage-deflate off, snapshots every tick.

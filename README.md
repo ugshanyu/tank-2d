@@ -21,11 +21,11 @@ client/shared/ → deterministic sim + binary protocol, imported by BOTH sides
 
 | Technique | Where | What it does |
 |---|---|---|
-| Authoritative server, fixed 30 Hz tick | `server/server.js` | One truth; cheating-resistant; stable physics |
+| Authoritative server, fixed 60 Hz tick | `server/server.js` | One truth; cheating-resistant; stable physics |
 | Client-side prediction | `client/js/game.js` | Your tank responds in **0 ms** — inputs are applied locally the same frame |
 | Server reconciliation | `client/js/game.js` `_reconcile` | Snapshots ack input seq; predicted state is reset + unacked inputs replayed. Residual error decays visually, never snaps |
 | Shared deterministic sim | `client/shared/sim.js` | Client & server run byte-identical physics → predictions land exactly on the server result |
-| Entity interpolation | `client/js/game.js` `remoteStates` | Remote tanks render ~100 ms in the past between two real snapshots → perfectly smooth despite jitter |
+| Entity interpolation | `client/js/game.js` `remoteStates` | Remote tanks render ~66 ms in the past between two real snapshots → perfectly smooth despite jitter |
 | Event-sourced bullets | `fire`/`bx` events | One event per shot; both sides simulate the deterministic trajectory. No per-bullet state on the wire, no stutter |
 | Binary hot path | `client/shared/protocol.js` | 11-byte inputs, 14 bytes/tank snapshots, quantized positions/angles. JSON only for rare events |
 | TCP latency hygiene | `server/server.js` | `TCP_NODELAY` on, `permessage-deflate` off, snapshots skipped for choked sockets |
@@ -33,7 +33,7 @@ client/shared/ → deterministic sim + binary protocol, imported by BOTH sides
 
 ### Protocol
 
-- **C→S** `INPUT` (binary, 11 B): seq, move vector, fire flag, aim angle, fire nonce — sent every tick (30/s)
+- **C→S** `INPUT` (binary, 11 B): seq, move vector, fire flag, aim angle, fire nonce — sent every tick (60/s)
 - **C→S** `PING` / **S→C** `PONG` (binary): RTT display + liveness
 - **S→C** `SNAPSHOT` (binary): tick, per-client input ack, all tanks (pos/vel/angles/hp/score quantized)
 - **JSON events**: `hello`, `welcome`, `join/leave`, `fire`, `bx` (bullet end), `death`, `spawn`

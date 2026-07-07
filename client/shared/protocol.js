@@ -3,7 +3,7 @@
 // Infrequent messages (join/leave/fire/death) are JSON text frames for clarity.
 
 // ---- Simulation constants (must match on client & server) ----
-export const TICK_RATE = 30;            // fixed simulation tick (Hz), client & server
+export const TICK_RATE = 60;            // fixed simulation tick (Hz), client & server
 export const DT = 1 / TICK_RATE;
 export const ARENA_W = 2400;
 export const ARENA_H = 1600;
@@ -25,7 +25,10 @@ export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank cente
 
 export const RESPAWN_DELAY = 2.5;       // seconds
 export const MAX_PLAYERS_PER_ROOM = 8;
-export const INTERP_DELAY_MS = 100;     // remote entities rendered this far in the past
+export const INTERP_DELAY_MS = 66;      // remote entities rendered this far in the past
+                                        // (~4 snapshots @60 Hz: survives a dropped
+                                        // snapshot without extrapolating, still ~34 ms
+                                        // more realtime than the old 30 Hz / 100 ms)
 
 // ---- Binary message type ids ----
 export const MSG = {

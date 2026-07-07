@@ -1,4 +1,4 @@
-// Boot + game loop. Fixed-tick accumulator (30 Hz) drives input/prediction;
+// Boot + game loop. Fixed-tick accumulator (60 Hz) drives input/prediction;
 // rendering runs every animation frame with interpolation.
 
 import { serverUrl, roomId } from './config.js';
