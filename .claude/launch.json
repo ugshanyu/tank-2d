@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tank-client",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "5179", "--directory", "/Users/ugshanyu/tank/client"],
+      "port": 5179
+    }
+  ]
+}
