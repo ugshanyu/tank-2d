@@ -2,7 +2,7 @@
 //   1. ?server=wss://... query override (handy for testing any environment)
 //   2. localhost dev -> local server
 //   3. production Railway URL (set after `railway domain`)
-export const PROD_SERVER_URL = '__SERVER_URL__'; // replaced with wss://... at deploy setup
+export const PROD_SERVER_URL = 'wss://tank-production-5873.up.railway.app';
 
 export function serverUrl() {
   const q = new URLSearchParams(location.search).get('server');
