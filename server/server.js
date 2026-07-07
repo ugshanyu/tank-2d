@@ -91,18 +91,18 @@ function stepRoom(room) {
     p.tank.turret = p.turret;
   }
 
-  // 2. bullets
+  // 2. bullets — swept hit test (pre-step → post-step segment vs tank circle),
+  // so point-blank shots and fast bullets can't skip over a target between ticks
   const survivors = [];
   for (const b of room.bullets) {
+    const px = b.x, py = b.y;
     const alive = stepBullet(b, DT);
     let hit = null;
-    if (alive) {
-      for (const p of room.players.values()) {
-        const t = p.tank;
-        if (!t.alive) continue;
-        if (p.id === b.owner && b.age < OWNER_GRACE) continue;
-        if (Math.hypot(t.x - b.x, t.y - b.y) < TANK_RADIUS + BULLET_RADIUS) { hit = p; break; }
-      }
+    for (const p of room.players.values()) {
+      const t = p.tank;
+      if (!t.alive) continue;
+      if (p.id === b.owner && b.age < OWNER_GRACE) continue;
+      if (segCircleDist(px, py, b.x, b.y, t.x, t.y) < TANK_RADIUS + BULLET_RADIUS) { hit = p; break; }
     }
     if (alive && !hit) { survivors.push(b); continue; }
     room.broadcastJson({ t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y), hit: hit ? hit.id : 0 });
@@ -133,9 +133,12 @@ function stepRoom(room) {
 }
 
 function tryFire(room, p, inp) {
+  // Leaky-bucket cooldown on processing time: the jitter-buffer catch-up can
+  // process a legitimately spaced shot "early", so allow a burst of 2 while
+  // capping the sustained rate at exactly 1/FIRE_COOLDOWN (anti-cheat bound).
   const now = tick * DT;
-  if (now - p.lastFireTime < FIRE_COOLDOWN - 1e-6) return;
-  p.lastFireTime = now;
+  if (now < p.nextFireAt - 1e-6) return;
+  p.nextFireAt = Math.max(p.nextFireAt, now - FIRE_COOLDOWN) + FIRE_COOLDOWN;
   const a = inp.aim;
   const x = p.tank.x + Math.cos(a) * MUZZLE_OFFSET;
   const y = p.tank.y + Math.sin(a) * MUZZLE_OFFSET;
@@ -150,6 +153,14 @@ function tryFire(room, p, inp) {
     x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10,
     a: Math.round(a * 1000) / 1000, tick,
   });
+}
+
+// closest distance from segment (x1,y1)-(x2,y2) to point (cx,cy)
+function segCircleDist(x1, y1, x2, y2, cx, cy) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2)) : 0;
+  return Math.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy));
 }
 
 function applyDamage(room, victim, killerId) {
@@ -211,8 +222,14 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server, perMessageDeflate: false, maxPayload: 2048 });
 
+// Optional browser-origin allowlist (comma-separated). Unset = allow all —
+// non-browser clients (bots, tests) send no Origin and are always allowed.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+
 wss.on('connection', (ws, req) => {
   if (wss.clients.size > MAX_CONNS) { ws.close(1013, 'server full'); return; }
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.length && origin && !ALLOWED_ORIGINS.includes(origin)) { ws.close(4003, 'origin not allowed'); return; }
   req.socket.setNoDelay(true);
 
   let player = null;
@@ -222,12 +239,17 @@ wss.on('connection', (ws, req) => {
   const helloTimer = setTimeout(() => { if (!player) ws.close(4000, 'hello timeout'); }, HELLO_TIMEOUT_MS);
 
   ws.on('message', (data, isBinary) => {
+    try { handleMessage(data, isBinary); } catch { /* a bad frame must never take the server down */ }
+  });
+
+  function handleMessage(data, isBinary) {
     lastMsgAt = Date.now();
 
     if (!isBinary) {
       // JSON control messages
       let msg;
       try { msg = JSON.parse(data.toString().slice(0, 512)); } catch { return; }
+      if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return; // JSON.parse('null') etc.
       if (msg.t === 'hello' && !player) {
         const roomId = String(msg.room || 'arena').replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'arena';
         const name = String(msg.name || 'tank').replace(/[<>&"']/g, '').trim().slice(0, 12) || 'tank';
@@ -242,7 +264,7 @@ wss.on('connection', (ws, req) => {
           id, name, ws,
           tank: makeTank(id, s.x, s.y),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
-          lastFireTime: -10, respawnAt: 0,
+          nextFireAt: -10, respawnAt: 0,
         };
         room.players.set(id, player);
         ws.send(JSON.stringify({
@@ -267,12 +289,17 @@ wss.on('connection', (ws, req) => {
     } else if (type === MSG.PING && buf.length >= 9) {
       ws.send(encodePong(v.getFloat64(1, true), Date.now()));
     }
-  });
+  }
 
   ws.on('close', () => {
     clearTimeout(helloTimer);
     if (player && room) {
       room.players.delete(player.id);
+      // retire the leaver's in-flight bullets so a rejoining id can't inherit
+      // kill credit (and clients get a clean despawn event)
+      const orphaned = room.bullets.filter((b) => b.owner === player.id);
+      room.bullets = room.bullets.filter((b) => b.owner !== player.id);
+      for (const b of orphaned) room.broadcastJson({ t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y), hit: 0 });
       room.broadcastJson({ t: 'leave', id: player.id });
       if (room.players.size === 0) { rooms.delete(room.id); }
     }

@@ -94,6 +94,16 @@ async function main() {
     check(!!a0 && !!b0, `both tanks in snapshots (A@${a0?.x},${a0?.y} B@${b0?.x},${b0?.y})`);
     check(a0.hp === MAX_HP && a0.alive, 'A alive at full hp');
 
+    // ---- malformed frames must not kill the server ----
+    A.ws.send('null');                              // JSON.parse('null') → not an object
+    A.ws.send('{"t":123}');                         // wrong type for t
+    A.ws.send(Buffer.from([1, 2]));                 // truncated binary INPUT
+    A.ws.send(Buffer.from([99, 0, 0, 0, 0, 0, 0])); // unknown binary type
+    await sleep(300);
+    const tickBefore = A.snap?.tick ?? 0;
+    await sleep(300);
+    check((A.snap?.tick ?? 0) > tickBefore, 'server still ticking after malformed frames');
+
     // ---- movement + acks ----
     await A.drive(36, 1, 0); // ~1.2 s driving right
     await sleep(120);

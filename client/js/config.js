@@ -10,6 +10,10 @@ export function serverUrl() {
   if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
     return 'ws://localhost:8080';
   }
+  if (!/^wss?:\/\//.test(PROD_SERVER_URL)) {
+    // template guard: fail loudly instead of hanging on a placeholder URL
+    throw new Error('Game server URL not configured — set PROD_SERVER_URL in client/js/config.js');
+  }
   return PROD_SERVER_URL;
 }
 

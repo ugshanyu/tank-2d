@@ -83,8 +83,10 @@ export class Input {
     if (this._keys.has('KeyS') || this._keys.has('ArrowDown')) ky += 1;
 
     if (this.mode === 'tilt' && this.tiltReady && this._beta0 !== null) {
-      const db = (this._beta - this._beta0);
-      const dg = (this._gamma - this._gamma0);
+      // shortest-signed-angle deltas: beta/gamma wrap at ±180/±90, and a raw
+      // subtraction across the wrap would slam movement to full speed backwards
+      const db = wrapDeg(this._beta - this._beta0);
+      const dg = wrapDeg(this._gamma - this._gamma0);
       // rotate device axes into screen axes
       const angle = this._screenAngle();
       let x, y;
@@ -155,6 +157,14 @@ export class Input {
     c.addEventListener('pointercancel', release);
     c.addEventListener('lostpointercapture', release);
 
+    // the tilt neutral is orientation-relative: recalibrate after rotation settles
+    const onOrient = () => setTimeout(() => this.calibrate(), 700);
+    if (screen.orientation && screen.orientation.addEventListener) {
+      screen.orientation.addEventListener('change', onOrient);
+    } else {
+      window.addEventListener('orientationchange', onOrient);
+    }
+
     window.addEventListener('keydown', (e) => {
       if (e.code === 'Space') e.preventDefault();
       this._keys.add(e.code);
@@ -166,3 +176,4 @@ export class Input {
 }
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrapDeg = (d) => ((d % 360) + 540) % 360 - 180;

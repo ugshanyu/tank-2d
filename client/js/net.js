@@ -32,6 +32,10 @@ export class Net {
 
     ws.onopen = () => {
       this.backoff = 500;
+      // re-anchor the server-clock estimate on every (re)connection: a
+      // restarted server's tick time can be far BELOW the old estimate, and
+      // the EMA only corrects downward slowly
+      this._clockInit = false;
       ws.send(JSON.stringify({ t: 'hello', name: this.name, room: this.room }));
       this._pingTimer = setInterval(() => {
         if (ws.readyState === 1) ws.send(encodePing(performance.now()));

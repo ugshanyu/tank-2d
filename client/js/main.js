@@ -20,7 +20,15 @@ let game = null;
 const nameEl = $('name');
 nameEl.value = localStorage.getItem('tank_name') || '';
 
+let started = false;
+let wakeLock = null;
+async function acquireWakeLock() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+}
+
 $('play').addEventListener('click', async () => {
+  if (started) return; // double-tap would spawn a second session
+  started = true;
   const name = (nameEl.value.trim() || 'tank-' + Math.floor(Math.random() * 99));
   localStorage.setItem('tank_name', name);
 
@@ -34,10 +42,15 @@ $('play').addEventListener('click', async () => {
   }
 
   try { await document.documentElement.requestFullscreen?.(); } catch { /* iOS Safari: no fullscreen API */ }
-  try { await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
+  await acquireWakeLock();
 
   $('start').style.display = 'none';
   start(name);
+});
+
+// wake locks are released when the page is hidden — take it back on return
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && started) acquireWakeLock();
 });
 
 $('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
@@ -53,8 +66,10 @@ function toast(text, ms = 2200) {
 
 // ---- connection + loop ----
 function start(name) {
+  let url;
+  try { url = serverUrl(); } catch (e) { toast(e.message, 10000); throw e; }
   game = new Game(null); // net assigned below (Net calls back immediately)
-  net = new Net(serverUrl(), {
+  net = new Net(url, {
     name,
     room: roomId(),
     onSnapshot: (s) => game.onSnapshot(s),
@@ -101,10 +116,14 @@ function start(name) {
 
     const renderMs = game.frame();
 
-    // my predicted bullets extrapolate within the local tick; confirmed ones within the remote tick
+    // my predicted bullets extrapolate within the local tick; confirmed ones
+    // within their own timeline cursor (dormant until born on the render timeline)
     const bullets = [];
-    const remFrac = game.remoteSimTimeMs === null ? 0 : (renderMs - game.remoteSimTimeMs) / 1000;
-    for (const b of game.bullets.values()) bullets.push({ x: b.x + b.vx * remFrac, y: b.y + b.vy * remFrac, vx: b.vx, vy: b.vy });
+    for (const b of game.bullets.values()) {
+      if (b.bornMs > renderMs) continue; // fired "in the future" of the interpolated view
+      const f = Math.min((renderMs - b.simMs) / 1000, DT);
+      bullets.push({ x: b.x + b.vx * f, y: b.y + b.vy * f, vx: b.vx, vy: b.vy });
+    }
     for (const b of game.predicted.values()) bullets.push({ x: b.x + b.vx * acc, y: b.y + b.vy * acc, vx: b.vx, vy: b.vy });
 
     renderer.draw({

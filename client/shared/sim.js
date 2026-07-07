@@ -102,31 +102,40 @@ export function stepTank(t, input, dt) {
 
 // Advance one bullet by one fixed tick. Mutates {x,y,vx,vy,age,bounces}.
 // Returns false when the bullet expired (ttl or too many bounces).
+// Movement is substepped (≤8px per substep) so fast bullets can't clip
+// through wall corners between discrete collision checks.
 export function stepBullet(b, dt) {
   b.age += dt;
   if (b.age > BULLET_TTL) return false;
-  b.x += b.vx * dt;
-  b.y += b.vy * dt;
 
   const r = BULLET_RADIUS;
-  let bounced = false;
-  if (b.x < r) { b.x = r + (r - b.x); b.vx = -b.vx; bounced = true; }
-  if (b.x > ARENA_W - r) { b.x = (ARENA_W - r) - (b.x - (ARENA_W - r)); b.vx = -b.vx; bounced = true; }
-  if (b.y < r) { b.y = r + (r - b.y); b.vy = -b.vy; bounced = true; }
-  if (b.y > ARENA_H - r) { b.y = (ARENA_H - r) - (b.y - (ARENA_H - r)); b.vy = -b.vy; bounced = true; }
+  const speed = Math.hypot(b.vx, b.vy);
+  const steps = Math.max(1, Math.ceil((speed * dt) / 8));
+  const h = dt / steps;
 
-  for (const rect of OBSTACLES) {
-    const n = resolveCircleRect(b, r, rect);
-    if (n) {
-      const vn = b.vx * n.nx + b.vy * n.ny;
-      if (vn < 0) { b.vx -= 2 * vn * n.nx; b.vy -= 2 * vn * n.ny; }
-      bounced = true;
+  for (let i = 0; i < steps; i++) {
+    b.x += b.vx * h;
+    b.y += b.vy * h;
+
+    let bounced = false;
+    if (b.x < r) { b.x = r + (r - b.x); b.vx = -b.vx; bounced = true; }
+    if (b.x > ARENA_W - r) { b.x = (ARENA_W - r) - (b.x - (ARENA_W - r)); b.vx = -b.vx; bounced = true; }
+    if (b.y < r) { b.y = r + (r - b.y); b.vy = -b.vy; bounced = true; }
+    if (b.y > ARENA_H - r) { b.y = (ARENA_H - r) - (b.y - (ARENA_H - r)); b.vy = -b.vy; bounced = true; }
+
+    for (const rect of OBSTACLES) {
+      const n = resolveCircleRect(b, r, rect);
+      if (n) {
+        const vn = b.vx * n.nx + b.vy * n.ny;
+        if (vn < 0) { b.vx -= 2 * vn * n.nx; b.vy -= 2 * vn * n.ny; }
+        bounced = true;
+      }
     }
-  }
 
-  if (bounced) {
-    b.bounces += 1;
-    if (b.bounces > BULLET_MAX_BOUNCES) return false;
+    if (bounced) {
+      b.bounces += 1;
+      if (b.bounces > BULLET_MAX_BOUNCES) return false;
+    }
   }
   return true;
 }

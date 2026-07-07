@@ -12,6 +12,7 @@
 
 import {
   DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, wrapAngle,
+  encAngle16, decAngle16,
 } from '../shared/protocol.js';
 import { stepTank, stepBullet } from '../shared/sim.js';
 
@@ -37,10 +38,12 @@ export class Game {
     // interpolation
     this.remotes = new Map();     // id -> [{tMs, x,y,vx,vy,hull,turret,hp,alive,score}, ...]
 
-    // bullets: confirmed (from fire events) + predicted (mine, awaiting echo)
-    this.bullets = new Map();     // bid -> bullet {x,y,px,py,vx,vy,age,bounces,owner}
+    // bullets: confirmed (from fire events) + predicted (mine, awaiting echo).
+    // Each confirmed bullet carries its own timeline cursor (simMs): it is
+    // stepped from its birth tick up to the render time, so a bullet can never
+    // run ahead of the interpolated tanks nor depend on a pre-sync global clock.
+    this.bullets = new Map();     // bid -> {x,y,vx,vy,age,bounces,owner,bornMs,simMs}
     this.predicted = new Map();   // nonce -> bullet (+ .bornAt wall-clock)
-    this.remoteSimTimeMs = null;  // how far confirmed bullets have been simulated
 
     this.effects = [];            // {kind,x,y,born,dur,r}
     this.aim = 0;
@@ -49,9 +52,15 @@ export class Game {
 
   // ---------- fixed 30 Hz tick: sample input, predict, send ----------
   tick(input, aimAngle) {
-    this.aim = aimAngle;
     if (!this.me) return;
     this.seq = (this.seq + 1) & 0xffff;
+
+    // quantize to wire precision FIRST so prediction, replay and the server
+    // all simulate from byte-identical values (raw floats would drift at the
+    // sim deadzone boundary and cause endless micro-corrections)
+    const aim = decAngle16(encAngle16(aimAngle));
+    const q = (v) => Math.max(-127, Math.min(127, Math.round(v * 127))) / 127;
+    this.aim = aim;
 
     let firing = false;
     let nonce = 0;
@@ -61,19 +70,20 @@ export class Game {
       this.fireNonce = (this.fireNonce + 1) & 0xffff;
       nonce = this.fireNonce;
       this.lastFireSeq = this.seq;
-      this._spawnPredicted(nonce, aimAngle);
     }
 
-    const inp = { seq: this.seq, moveX: input.moveX, moveY: input.moveY, firing, aim: aimAngle, fireNonce: nonce };
+    const inp = { seq: this.seq, moveX: q(input.moveX), moveY: q(input.moveY), firing, aim, fireNonce: nonce };
     this.pending.push(inp);
     if (this.pending.length > 120) this.pending.shift(); // runaway guard when disconnected
 
+    // move THEN fire — same order as the server, so the predicted muzzle
+    // position matches the authoritative one exactly
     if (aliveNow) stepTank(this.me, inp, DT);
+    if (firing) this._spawnPredicted(nonce, aim);
     this.net.sendInput(inp.seq, inp.moveX, inp.moveY, inp.firing, inp.aim, inp.fireNonce);
 
     // advance my predicted bullets on the same fixed timeline
     for (const [nonceKey, b] of this.predicted) {
-      b.px = b.x; b.py = b.y;
       if (!stepBullet(b, DT)) this.predicted.delete(nonceKey);
     }
   }
@@ -87,7 +97,7 @@ export class Game {
     const x = this.me.x + Math.cos(a) * MUZZLE_OFFSET;
     const y = this.me.y + Math.sin(a) * MUZZLE_OFFSET;
     this.predicted.set(nonce, {
-      x, y, px: x, py: y,
+      x, y,
       vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
       age: 0, bounces: 0, owner: this.myId, bornAt: performance.now(),
     });
@@ -158,29 +168,34 @@ export class Game {
         this.myId = msg.id;
         this.names.clear();
         for (const p of msg.players) this.names.set(p.id, p.name);
+        // reconnect hygiene: drop state from the previous connection
+        this.bullets.clear();
+        this.predicted.clear();
+        this.remotes.clear();
+        this.pending.length = 0;
         break;
       case 'join': this.names.set(msg.id, msg.name); break;
       case 'leave': this.names.delete(msg.id); this.remotes.delete(msg.id); break;
       case 'fire': {
+        const bornMs = msg.tick * DT * 1000;
         if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
-          // my predicted bullet confirmed: hand it to the confirmed set under the
-          // server's id, keeping its predicted position (continuity, no re-sim)
+          // my predicted bullet confirmed: hand it to the confirmed set under
+          // the server's id, keeping its predicted position (continuity). Its
+          // cursor starts at the current render time — it is already "ahead".
           const b = this.predicted.get(msg.nonce);
           this.predicted.delete(msg.nonce);
+          b.bornMs = bornMs;
+          b.simMs = this.net.serverNowMs() - INTERP_DELAY_MS;
           this.bullets.set(msg.bid, b);
           break;
         }
-        // remote shot: spawn at event tick, fast-forward to the remote timeline
-        const b = {
-          x: msg.x, y: msg.y, px: msg.x, py: msg.y,
+        // remote shot: dormant until the interpolated timeline reaches its
+        // birth tick; frame() then steps it with its own cursor
+        this.bullets.set(msg.bid, {
+          x: msg.x, y: msg.y,
           vx: Math.cos(msg.a) * BULLET_SPEED, vy: Math.sin(msg.a) * BULLET_SPEED,
-          age: 0, bounces: 0, owner: msg.id,
-        };
-        const bornMs = msg.tick * DT * 1000;
-        const target = this.remoteSimTimeMs ?? bornMs;
-        let alive = true;
-        for (let t = bornMs; t < target && alive; t += DT * 1000) alive = stepBullet(b, DT);
-        if (alive) this.bullets.set(msg.bid, b);
+          age: 0, bounces: 0, owner: msg.id, bornMs, simMs: bornMs,
+        });
         if (msg.id !== this.myId) this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
         break;
       }
@@ -207,17 +222,16 @@ export class Game {
   // ---------- per-render-frame: advance confirmed bullets on the remote timeline ----------
   frame() {
     const renderMs = this.net.serverNowMs() - INTERP_DELAY_MS;
-    if (this.remoteSimTimeMs === null) this.remoteSimTimeMs = renderMs;
-    let guard = 0;
-    while (this.remoteSimTimeMs + DT * 1000 <= renderMs && guard < 30) {
-      for (const [bid, b] of this.bullets) {
-        b.px = b.x; b.py = b.y;
-        if (!stepBullet(b, DT)) this.bullets.delete(bid); // server 'bx' is authoritative; this is cosmetic cleanup
+    const stepMs = DT * 1000;
+    for (const [bid, b] of this.bullets) {
+      // each bullet catches its own cursor up to render time; TTL bounds the
+      // loop (~45 steps) even after long tab-background gaps. Removal here is
+      // cosmetic cleanup — the server 'bx' event is authoritative.
+      while (b.simMs + stepMs <= renderMs) {
+        if (!stepBullet(b, DT)) { this.bullets.delete(bid); break; }
+        b.simMs += stepMs;
       }
-      this.remoteSimTimeMs += DT * 1000;
-      guard++;
     }
-    if (guard >= 30) this.remoteSimTimeMs = renderMs; // tab was backgrounded; jump
 
     // decay correction offset
     this.errX *= 0.86;
@@ -247,7 +261,9 @@ export class Game {
         const dtMs = Math.min(renderMs - b.tMs, MAX_EXTRAP_MS);
         st = { ...b, x: b.x + b.vx * dtMs / 1000, y: b.y + b.vy * dtMs / 1000 };
       } else {
-        const f = (renderMs - a.tMs) / Math.max(1, b.tMs - a.tMs);
+        // clamp: right after spawn/join every buffered entry can be newer than
+        // renderMs — hold at the first snapshot instead of extrapolating backwards
+        const f = Math.min(1, Math.max(0, (renderMs - a.tMs) / Math.max(1, b.tMs - a.tMs)));
         st = {
           ...b,
           x: lerp(a.x, b.x, f), y: lerp(a.y, b.y, f),

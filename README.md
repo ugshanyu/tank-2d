@@ -41,8 +41,16 @@ client/shared/ → deterministic sim + binary protocol, imported by BOTH sides
 ### Server-side validation (never trust the client)
 
 Movement is *simulated* from inputs, never accepted as positions. Fire cooldown enforced
-server-side. Input values clamped by the codec. Oversized frames dropped (`maxPayload`),
-idle sockets kicked, rooms/players capped.
+server-side (leaky bucket: tolerates jitter catch-up, caps sustained rate). Input values
+clamped by the codec. Malformed/oversized frames dropped, idle sockets kicked,
+rooms/players capped. Hits use a swept segment test (no point-blank or corner tunneling).
+Optional `ALLOWED_ORIGINS` env (comma-separated) restricts browser origins.
+
+### Testing
+
+`npm test` boots the server and runs a scripted 2-player match over the real protocol:
+join, movement + input acks, malformed-frame resilience, fire → hit → death → score,
+respawn, leave/rejoin.
 
 ## Run locally
 
