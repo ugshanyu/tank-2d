@@ -10,7 +10,7 @@ import {
 import { Net } from './net.js';
 import { Input } from './input.js';
 import { Game } from './game.js';
-import { Renderer, teamColor } from './render.js';
+import { Renderer, teamColor, setShakeScale, getShakeScale } from './render.js';
 import { Sfx, haptic } from './audio.js';
 import { makeTank, stepTank, stepBullet, TEAM_SPAWNS } from '../shared/sim.js';
 
@@ -23,7 +23,8 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
                   'match', 'matchWho', 'matchSub', 'matchTally', 'hurt', 'gear',
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
-                  'offline', 'offlineSub']) {
+                  'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
+                  'feed', 'killbanner']) {
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
@@ -162,7 +163,10 @@ function syncSheet() {
   EL.optTilt.disabled = !input.tiltReady;
   EL.optSound.textContent = sfx.muted ? 'Off' : 'On';
   EL.optHaptics.textContent = hapticsOn ? 'On' : 'Off';
-  EL.calibrate.style.display = input.mode === 'tilt' ? 'block' : 'none';
+  const s = getShakeScale();
+  EL.shake0.classList.toggle('sel', s === 0);
+  EL.shake1.classList.toggle('sel', s > 0 && s < 0.8);
+  EL.shake2.classList.toggle('sel', s >= 0.8);
 }
 let hapticsOn = true;
 try { hapticsOn = localStorage.getItem('tank.haptics') !== '0'; } catch { /* private mode */ }
@@ -183,6 +187,9 @@ function wireUi() {
     try { localStorage.setItem('tank.haptics', hapticsOn ? '1' : '0'); } catch { /* ignore */ }
     syncSheet();
   });
+  EL.shake0.addEventListener('click', () => { setShakeScale(0); syncSheet(); });
+  EL.shake1.addEventListener('click', () => { setShakeScale(0.5); syncSheet(); });
+  EL.shake2.addEventListener('click', () => { setShakeScale(1); syncSheet(); });
   EL.optCal.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   EL.optHelp.addEventListener('click', () => { openSheet(false); showIntro(); });
   EL.introGo.addEventListener('click', () => {
@@ -334,7 +341,12 @@ function startNet(resolveUrl) {
     const take = () => (bulletPool[bi] || (bulletPool[bi] = { x: 0, y: 0, vx: 0, vy: 0, mine: false }));
     for (const bid of game.bullets.keys()) {
       const b = game.bullets.get(bid);
-      if (b.bornMs > renderMs) continue; // fired "in the future" of the interpolated view
+      // Remote shells stay dormant until the interpolated timeline reaches their
+      // birth tick. YOUR OWN must not — your predicted shell is handed over on the
+      // fire echo with bornMs at the server's fire tick, which is ~(INTERP_DELAY -
+      // rtt/2) ahead of renderMs, so gating it blanked your own shell for ~75 ms
+      // right after the muzzle flash.
+      if (b.owner !== game.myId && b.bornMs > renderMs) continue;
       const f = Math.min((renderMs - b.simMs) / 1000, DT);
       const o = take(); bi++;
       o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
@@ -392,7 +404,7 @@ function drainFeedback() {
   for (let i = 0; i < q.length; i++) {
     const e = q[i];
     const pan = e.x !== undefined ? Math.max(-1, Math.min(1, (e.x - 360) / 360)) : 0;
-    sfx.play(e.kind, pan);
+    sfx.play(e.kind, pan, e.key);
     if (hapticsOn) haptic(e.kind);
     if (e.kind === 'hurt') hurtUntil = performance.now() + 260;
   }
@@ -422,6 +434,22 @@ function updateHud() {
   }
   const el = EL.scores;
   if (el.__last !== html) { el.innerHTML = html; el.__last = html; }
+
+  // kill feed (4 s per row)
+  const now = performance.now();
+  while (game.feed.length && now - game.feed[0].at > 4000) game.feed.shift();
+  const feedHtml = game.feed.map((f) =>
+    `<div><span style="color:${teamColor(f.killerTeam)}">${esc(f.killer)}</span>`
+    + ` <span style="color:#8b9dc0">▸</span> `
+    + `<span style="color:${teamColor(f.victimTeam)}">${esc(f.victim)}</span></div>`).join('');
+  if (EL.feed.__last !== feedHtml) { EL.feed.innerHTML = feedHtml; EL.feed.__last = feedHtml; }
+
+  const banner = now - game.killBannerAt < 500;
+  if (EL.killbanner.__on !== banner) {
+    EL.killbanner.__on = banner;
+    if (banner) EL.killbanner.textContent = `ELIMINATED ${game.killBannerName}`.trim();
+    EL.killbanner.classList.toggle('on', banner);
+  }
 
   // Match result overlay. Toggling a CSS class (not style.display) so it can
   // actually animate — `display` is not transitionable, so every overlay used to
@@ -491,7 +519,7 @@ function startSoloPractice() {
     }
 
     acc += dt;
-    if (acc > DT * 6) acc = DT;
+    if (acc > DT * 6) acc = DT * 6;   // clamp, don't discard real time
     while (acc >= DT) {
       acc -= DT;
       stepTank(tank, { moveX: input.moveX, moveY: input.moveY }, DT);

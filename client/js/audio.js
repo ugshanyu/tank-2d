@@ -5,8 +5,8 @@
 // Browsers only allow an AudioContext to start from a user gesture, so this is
 // unlocked from the same first touch that requests motion permission.
 
-const MASTER_GAIN = 0.5;
-const MIN_GAP_MS = 28;        // per-kind rate limit; bounces can arrive in bursts
+const MASTER_GAIN = 0.35;
+const MIN_GAP_MS = 28;        // rate limit per EMITTER, not per kind — see _gate
 
 export class Sfx {
   constructor() {
@@ -14,7 +14,7 @@ export class Sfx {
     this.master = null;
     this.noise = null;
     this.muted = false;
-    this.duck = 1;
+    this.duck = 1;                 // ducked while a result screen is up
     this._last = new Map();
     try { this.muted = localStorage.getItem('tank.muted') === '1'; } catch { /* private mode */ }
   }
@@ -28,7 +28,15 @@ export class Sfx {
       this.ctx = new AC();
       this.master = this.ctx.createGain();
       this.master.gain.value = this.muted ? 0 : MASTER_GAIN;
-      this.master.connect(this.ctx.destination);
+      // Four tanks and two towers firing sum well past 1.0 and clip audibly on
+      // the WebView mixer. Everything goes through a compressor before output.
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -12;
+      comp.ratio.value = 4;
+      comp.attack.value = 0.003;
+      comp.release.value = 0.15;
+      this.master.connect(comp);
+      comp.connect(this.ctx.destination);
 
       // one second of white noise, reused by every noise-based voice
       const n = this.ctx.sampleRate;
@@ -44,11 +52,16 @@ export class Sfx {
     try { localStorage.setItem('tank.muted', m ? '1' : '0'); } catch { /* ignore */ }
   }
 
-  _gate(kind) {
+  // Gate per EMITTER, not per kind. With four tanks on a 0.33 s cooldown the room
+  // produces ~12 'fire' events/sec against a 28 ms floor, so a single per-kind gate
+  // silently swallowed roughly a third of all shots — including your own, which
+  // reads exactly like the game dropping your input.
+  _gate(kind, key) {
+    const id = key === undefined ? kind : `${kind}:${key}`;
     const now = performance.now();
-    const last = this._last.get(kind) || -1e9;
+    const last = this._last.get(id) || -1e9;
     if (now - last < MIN_GAP_MS) return false;
-    this._last.set(kind, now);
+    this._last.set(id, now);
     return true;
   }
 
@@ -64,7 +77,9 @@ export class Sfx {
     return this.master;
   }
 
-  _tone({ type = 'sine', f0, f1, dur, gain, pan = 0, delay = 0 }) {
+  // `attack` matters: impacts need <=3 ms to read as a transient, UI wants 15-30 ms.
+  // A single hardcoded 8 ms attack made a cannon, a ricochet and a chime feel identical.
+  _tone({ type = 'sine', f0, f1, dur, gain, pan = 0, delay = 0, attack = 0.003 }) {
     const ctx = this.ctx;
     const t = ctx.currentTime + delay;
     const o = ctx.createOscillator();
@@ -73,7 +88,7 @@ export class Sfx {
     o.frequency.setValueAtTime(f0, t);
     if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(Math.max(0.0001, gain * this.duck), t + 0.008);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0001, gain * this.duck), t + attack);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     o.connect(g); g.connect(this._out(pan));
     o.start(t); o.stop(t + dur + 0.02);
@@ -94,48 +109,58 @@ export class Sfx {
     src.start(t); src.stop(t + dur + 0.02);
   }
 
-  play(kind, pan = 0) {
+  // A phone speaker rolls off hard below ~150 Hz and a pure sine has no harmonics,
+  // so a "sine 70->42 Hz" impact literally produces silence on device. Every body
+  // tone here sits in the 110-400 Hz band and uses triangle/square so the upper
+  // harmonics carry the perceived pitch through the speaker.
+  play(kind, pan = 0, key) {
     if (!this.ctx || this.muted) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
-    if (!this._gate(kind)) return;
+    if (!this._gate(kind, key)) return;
+    const p = Math.max(-0.65, Math.min(0.65, pan));   // hard-panning is disorienting
     switch (kind) {
       case 'fire':
-        this._tone({ type: 'sawtooth', f0: 220, f1: 80, dur: 0.15, gain: 0.30, pan });
-        this._noise({ dur: 0.05, gain: 0.22, pan, type: 'highpass', freq: 900 });
+        this._noise({ dur: 0.012, gain: 0.5, pan: p, type: 'highpass', freq: 3000 }); // crack
+        this._tone({ type: 'sawtooth', f0: 300, f1: 120, dur: 0.13, gain: 0.30, pan: p });
+        this._noise({ dur: 0.26, gain: 0.26, pan: p, freq: 900 });                    // body/tail
         break;
       case 'hit':                                   // my shell hit someone
-        this._noise({ dur: 0.09, gain: 0.42, pan, freq: 1200 });
-        this._tone({ type: 'square', f0: 320, f1: 140, dur: 0.08, gain: 0.16, pan });
+        this._noise({ dur: 0.09, gain: 0.42, pan: p, freq: 1600 });
+        this._tone({ type: 'triangle', f0: 420, f1: 190, dur: 0.09, gain: 0.20, pan: p });
         break;
       case 'hurt':                                  // I took damage
-        this._noise({ dur: 0.14, gain: 0.5, pan: 0, freq: 700 });
-        this._tone({ type: 'sine', f0: 180, f1: 70, dur: 0.18, gain: 0.3 });
+        this._noise({ dur: 0.16, gain: 0.5, freq: 900 });
+        this._tone({ type: 'triangle', f0: 260, f1: 130, dur: 0.2, gain: 0.34 });
+        this._tone({ type: 'square', f0: 175, f1: 95, dur: 0.18, gain: 0.12 });
         break;
       case 'bounce':
-        this._noise({ dur: 0.04, gain: 0.10, pan, type: 'bandpass', freq: 700 + Math.random() * 400, q: 4 });
+        this._noise({ dur: 0.05, gain: 0.12, pan: p, type: 'bandpass', freq: 2200 + Math.random() * 1600, q: 12 });
         break;
       case 'towerhit':
-        this._tone({ type: 'sine', f0: 70, f1: 42, dur: 0.24, gain: 0.5, pan });
-        this._noise({ dur: 0.10, gain: 0.25, pan, freq: 600 });
+        this._tone({ type: 'triangle', f0: 200, f1: 110, dur: 0.26, gain: 0.5, pan: p });
+        this._tone({ type: 'square', f0: 320, f1: 165, dur: 0.14, gain: 0.14, pan: p });
+        this._noise({ dur: 0.18, gain: 0.3, pan: p, freq: 1100 });
         break;
       case 'kill':
-        this._tone({ type: 'sine', f0: 880, dur: 0.06, gain: 0.28 });
-        this._tone({ type: 'sine', f0: 1320, dur: 0.09, gain: 0.26, delay: 0.06 });
+        this._noise({ dur: 0.05, gain: 0.3, type: 'bandpass', freq: 2600, q: 10 });
+        this._tone({ type: 'triangle', f0: 700, f1: 900, dur: 0.09, gain: 0.3, attack: 0.002 });
+        this._tone({ type: 'triangle', f0: 1050, f1: 1400, dur: 0.13, gain: 0.26, delay: 0.07 });
         break;
       case 'death':
-        this._noise({ dur: 0.55, gain: 0.6, freq: 420 });
-        this._tone({ type: 'sine', f0: 130, f1: 40, dur: 0.6, gain: 0.5 });
+        this._noise({ dur: 0.7, gain: 0.62, freq: 700 });
+        this._tone({ type: 'triangle', f0: 300, f1: 90, dur: 0.62, gain: 0.5 });
+        this._tone({ type: 'square', f0: 190, f1: 70, dur: 0.5, gain: 0.16 });
         break;
       case 'spawn':
-        this._tone({ type: 'triangle', f0: 300, f1: 900, dur: 0.18, gain: 0.22 });
+        this._tone({ type: 'triangle', f0: 300, f1: 900, dur: 0.18, gain: 0.22, attack: 0.02 });
         break;
       case 'win':
         [523, 659, 784, 1046].forEach((f, i) =>
-          this._tone({ type: 'triangle', f0: f, dur: 0.28, gain: 0.28, delay: i * 0.09 }));
+          this._tone({ type: 'triangle', f0: f, dur: 0.28, gain: 0.28, delay: i * 0.09, attack: 0.02 }));
         break;
       case 'lose':
         [440, 370, 294, 220].forEach((f, i) =>
-          this._tone({ type: 'triangle', f0: f, dur: 0.3, gain: 0.26, delay: i * 0.1 }));
+          this._tone({ type: 'triangle', f0: f, dur: 0.3, gain: 0.26, delay: i * 0.1, attack: 0.02 }));
         break;
     }
   }

@@ -74,6 +74,9 @@ export class Game {
     this.hitstopMs = 0;           // freeze the sim this long for impact weight
     this.lastHp = MAX_HP;
     this.events = [];             // {kind, x, y} feedback queue for audio/haptics
+    this.feed = [];               // kill feed rows — a 2v2 had no readable narrative
+    this.killBannerAt = -1e9;
+    this.killBannerName = '';
   }
 
   // ---------- fixed 30 Hz tick: sample input, predict, send ----------
@@ -123,6 +126,22 @@ export class Game {
     return performance.now() >= this._nextFireAtMs;
   }
 
+  // Ids are recycled aggressively (lowest free 1..4, and a bot refills a vacated
+  // seat the next tick), so pooled smoothing state MUST die with its owner —
+  // otherwise the new occupant glides in from the previous player's last position.
+  _forgetRemote(id) {
+    this.remotes.delete(id);
+    this._remotePool.delete(id);
+  }
+
+  // A respawn/reset teleports the tank. The buffer is cleared so nothing
+  // interpolates across it; the pooled offset has to be told too, or the teleport
+  // gets folded into errX and smoothed — exactly what clearing the buffer prevents.
+  _breakSmoothing(id) {
+    const st = this._remotePool.get(id);
+    if (st) { st.hasPrev = false; st.errX = 0; st.errY = 0; }
+  }
+
   // 0..1 for the reload arc drawn around your own tank
   reloadFraction() {
     const left = this._nextFireAtMs - performance.now();
@@ -138,7 +157,7 @@ export class Game {
     const y = this.me.y + this.errY + Math.sin(a) * MUZZLE_OFFSET;
     this.shake = Math.max(this.shake, 2.5);
     this.lastFireAt = performance.now();
-    this.events.push({ kind: 'fire' });
+    this.events.push({ kind: 'fire', key: this.myId, x });
     this.predicted.set(nonce, {
       x, y,
       vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
@@ -171,7 +190,7 @@ export class Game {
     // Drop remotes that vanished from snapshots (left the room). A presence stamp
     // replaces the Set+map that used to be allocated 60 times a second.
     for (const id of this.remotes.keys()) {
-      if (this.remotes.get(id).seen !== snap.tick) this.remotes.delete(id);
+      if (this.remotes.get(id).seen !== snap.tick) this._forgetRemote(id);
     }
   }
 
@@ -261,7 +280,7 @@ export class Game {
         this.names.delete(msg.id);
         this.teams.delete(msg.id);
         this.bots.delete(msg.id);
-        this.remotes.delete(msg.id);
+        this._forgetRemote(msg.id);
         break;
       case 'matchover':
         this.phase = 'over';
@@ -284,7 +303,11 @@ export class Game {
         this.predicted.clear();
         this.pending.length = 0;
         this.errX = 0; this.errY = 0;
-        for (const buf of this.remotes.values()) buf.length = 0; // don't interpolate across the reset
+        this._nextFireAtMs = 0;
+        for (const id of this.remotes.keys()) {
+          this.remotes.get(id).length = 0;  // don't interpolate across the reset
+          this._breakSmoothing(id);
+        }
         break;
       case 'fire': {
         const bornMs = msg.tick * DT * 1000;
@@ -306,7 +329,10 @@ export class Game {
           vx: Math.cos(msg.a) * BULLET_SPEED, vy: Math.sin(msg.a) * BULLET_SPEED,
           age: 0, bounces: 0, owner: msg.id, bornMs, simMs: bornMs,
         });
-        if (msg.id !== this.myId) this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
+        if (msg.id !== this.myId) {
+          this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
+          this.events.push({ kind: 'fire', key: msg.id, x: msg.x });
+        }
         break;
       }
       case 'bx': {
@@ -324,11 +350,11 @@ export class Game {
         });
         if (msg.tower >= 0) {
           this.shake = Math.max(this.shake, 5);
-          this.events.push({ kind: 'towerhit' });
+          this.events.push({ kind: 'towerhit', key: msg.tower, x: ex });
         } else if (msg.hit) {
-          this.events.push({ kind: msg.hit === this.myId ? 'hurt' : 'hit' });
+          this.events.push({ kind: msg.hit === this.myId ? 'hurt' : 'hit', key: msg.hit, x: ex });
         } else {
-          this.events.push({ kind: 'bounce' });
+          this.events.push({ kind: 'bounce', key: msg.bid, x: ex });
         }
         break;
       }
@@ -337,13 +363,29 @@ export class Game {
           this.respawnCountdown = performance.now() + RESPAWN_DELAY * 1000;
           this.killedBy = this.names.get(msg.killer) || (msg.killer >= 200 ? 'a tower' : '');
         } else if (msg.killer === this.myId) {
-          this.shake = Math.max(this.shake, 4);
+          // A kill is the emotional peak of the match and it used to get less
+          // feedback than being killed did: 4px of shake against 14px + a
+          // full-screen vignette. Match the weight.
+          this.shake = Math.max(this.shake, 10);
+          this.hitstopMs = Math.max(this.hitstopMs, 55);
+          this.killBannerAt = performance.now();
+          this.killBannerName = this.names.get(msg.victim) || '';
           this.events.push({ kind: 'kill' });
         }
+        this.feed.push({
+          killer: this.names.get(msg.killer) || (msg.killer >= 200 ? 'Tower' : '?'),
+          killerTeam: msg.killer >= 200 ? (this.teams.get(msg.victim) ^ 1) : (this.teams.get(msg.killer) ?? 0),
+          victim: this.names.get(msg.victim) || '?',
+          victimTeam: this.teams.get(msg.victim) ?? 0,
+          at: performance.now(),
+        });
+        if (this.feed.length > 3) this.feed.shift();
         break;
       case 'spawn': {
         const buf = this.remotes.get(msg.id);
         if (buf) buf.length = 0; // don't interpolate across a teleport
+        this._breakSmoothing(msg.id);
+        if (msg.id === this.myId) this._nextFireAtMs = 0;
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
       }
@@ -410,11 +452,15 @@ export class Game {
 
       let x, y, hull, turret;
       if (b.tMs <= renderMs) {
-        const age = renderMs - b.tMs;
-        const t = Math.min(1, age / MAX_EXTRAP_MS);
-        const damp = 1 - t * t;                 // velocity fades out smoothly
-        x = b.x + b.vx * damp * age / 1000;
-        y = b.y + b.vy * damp * age / 1000;
+        // Ease the extrapolated VELOCITY to zero by integrating it — scaling the
+        // displacement instead makes the curve peak and come back to zero, which
+        // literally drove the tank backwards at ~185 px/s when a stream stalled.
+        // disp(s) = s - s^3/(3T^2) is monotonic and plateaus at 2T/3.
+        const T = MAX_EXTRAP_MS / 1000;
+        const s = Math.min((renderMs - b.tMs) / 1000, T);
+        const disp = s - (s * s * s) / (3 * T * T);
+        x = b.x + b.vx * disp;
+        y = b.y + b.vy * disp;
         hull = b.hull; turret = b.turret;
       } else {
         // clamp: right after spawn/join every buffered entry can be newer than
@@ -425,10 +471,15 @@ export class Game {
         turret = lerpAngle(a.turret, b.turret, f);
       }
 
-      // fold any discontinuity since last frame into a decaying offset
+      // Fold only a genuine DISCONTINUITY into the offset. Comparing raw frame
+      // displacement against a fixed 1.5px threshold treated ordinary motion as a
+      // jump: at 205 px/s every frame moves 3.4px, so the offset accumulated
+      // continuously and drew every moving enemy up to 17px behind — and switched
+      // on and off as speed crossed the threshold. Compare against expected motion.
       if (st.hasPrev) {
+        const expect = Math.hypot(b.vx, b.vy) * dtSec + 2;
         const jump = Math.hypot(x - st.rawX, y - st.rawY);
-        if (jump > 1.5 && jump < 200) { st.errX += st.rawX - x; st.errY += st.rawY - y; }
+        if (jump > expect && jump < 200) { st.errX += st.rawX - x; st.errY += st.rawY - y; }
       }
       st.rawX = x; st.rawY = y; st.hasPrev = true;
       const m = Math.hypot(st.errX, st.errY);
@@ -444,10 +495,6 @@ export class Game {
       out.push(st);
     }
 
-    // drop pooled state for tanks that are gone
-    if (this._remotePool.size > this.remotes.size) {
-      for (const id of this._remotePool.keys()) if (!this.remotes.has(id)) this._remotePool.delete(id);
-    }
     return out;
   }
 

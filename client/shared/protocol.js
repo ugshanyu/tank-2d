@@ -23,11 +23,15 @@ export const TANK_BRAKE = 4200;         // px/s^2 when releasing input (asymmetr
 export const HULL_TURN_RATE = 16;       // rad/s hull visually turns toward velocity
 export const MAX_HP = 100;
 
-export const BULLET_SPEED = 420;        // px/s
+// At 420 px/s a shell was only 2x tank speed — below roughly 4x a projectile stops
+// reading as a SHOT and starts reading as a slow object you steer around. 900 px/s
+// crosses the arena in 1.4 s and lands like a gun. Damage drops so faster shells
+// don't halve time-to-kill: 4 hits instead of 3.
+export const BULLET_SPEED = 900;        // px/s (~4.4x tank speed)
 export const BULLET_RADIUS = 5;
-export const BULLET_TTL = 2.2;          // seconds (must outlast a cross-arena shot + bounce)
+export const BULLET_TTL = 1.8;          // seconds (must outlast a cross-arena shot + bounce)
 export const BULLET_MAX_BOUNCES = 1;    // dies on 2nd wall contact
-export const BULLET_DAMAGE = 34;
+export const BULLET_DAMAGE = 28;        // 4 shells to kill
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
 export const FIRE_COOLDOWN = 0.33;      // s between shots (server-enforced)
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center

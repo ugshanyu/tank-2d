@@ -34,10 +34,23 @@
     right: calc(var(--sar) + 12px); text-align: right; font-size: 12px;
     color: #9fb4d0; background: rgba(6,10,18,0.55); border-radius: 10px; padding: 8px 12px; }
   #status .bad { color: #ff8a80; }
-  #calibrate { position: absolute; bottom: calc(var(--sab) + 14px);
-    left: calc(var(--sal) + 14px); pointer-events: auto; display: none;
-    background: rgba(20,30,48,0.8); color: #cfe3ff; border: 1px solid #33507a;
-    border-radius: 12px; padding: 10px 16px; font-size: 14px; }
+  /* Hidden: it duplicated the settings sheet's "Level now" row while sitting in
+     the joystick zone, so resting a driving thumb re-levelled tilt mid-drive. */
+  #calibrate { display: none !important; }
+  /* kill feed — a 2v2 had no readable narrative; you never saw who killed whom */
+  #feed { position: absolute; top: calc(var(--sat) + 10px); right: calc(var(--sar) + 12px);
+    display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+    margin-top: 40px; font-size: 12px; }
+  #feed div { background: rgba(6,10,18,0.6); border-radius: 7px; padding: 3px 8px;
+    animation: slidein .18s ease-out both; }
+  @keyframes slidein { from { opacity: 0; transform: translateX(14px); } }
+  #killbanner { position: absolute; left: 50%; top: 34%; transform: translateX(-50%);
+    font-size: 22px; font-weight: 900; letter-spacing: 3px; color: #fff;
+    text-shadow: 0 2px 20px rgba(0,0,0,.9); opacity: 0; }
+  #killbanner.on { animation: slam .5s cubic-bezier(.16,1,.3,1) both; }
+  @keyframes slam { 0% { opacity: 0; transform: translateX(-50%) scale(1.6); }
+                    18% { opacity: 1; transform: translateX(-50%) scale(1); }
+                    75% { opacity: 1; } 100% { opacity: 0; } }
   #toast { position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
     background: rgba(6,10,18,0.75); padding: 10px 18px; border-radius: 12px;
     font-size: 15px; opacity: 0; transition: opacity .3s; text-align: center; }
@@ -51,16 +64,16 @@
 
   /* damage vignette — taking a hit used to produce no feedback whatsoever */
   #hurt { position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
-    box-shadow: inset 0 0 90px 30px rgba(255,40,40,.55);
-    transition: opacity .26s ease-out; }
-  #hurt.on { opacity: .95; transition-duration: .05s; }
+    box-shadow: inset 0 0 54px 6px rgba(255,40,40,.5);
+    transition: opacity .3s ease-out; }
+  #hurt.on { opacity: .85; transition-duration: .05s; }
 
   /* team scoreboard rows */
   #scores .row { display: flex; justify-content: space-between; gap: 10px; }
   #scores .hdr { font-weight: 800; letter-spacing: 1px; font-size: 11px; opacity: .85; margin-top: 4px; }
   #scores .hdr:first-child { margin-top: 0; }
   #scores .me { font-weight: 700; }
-  #scores i { font-style: normal; font-size: 9px; letter-spacing: .5px; color: #64769a;
+  #scores i { font-style: normal; font-size: 11px; letter-spacing: .5px; color: #8b9dc0;
     border: 1px solid #33405c; border-radius: 4px; padding: 0 3px; margin-left: 5px;
     vertical-align: middle; }
 
@@ -71,11 +84,13 @@
     opacity: 0; visibility: hidden; backdrop-filter: blur(2px);
     transition: opacity .22s ease-out, visibility 0s .22s; }
   #match.on { opacity: 1; visibility: visible; transition-delay: 0s; }
-  #match.on .who { animation: pop .34s cubic-bezier(.16,1,.3,1) both; }
+  @media (prefers-reduced-motion: no-preference) {
+    #match.on .who { animation: pop .34s cubic-bezier(.16,1,.3,1) both; }
+  }
   @keyframes pop { from { transform: scale(1.45); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   #match .who { font-size: 40px; font-weight: 900; letter-spacing: 6px; }
   #match .sub { font-size: 15px; color: #9fb4d0; }
-  #match .tally { font-size: 13px; color: #64769a; letter-spacing: 1px; }
+  #match .tally { font-size: 13px; color: #8b9dc0; letter-spacing: 1px; }
 
   /* 44x44pt minimum tap targets, per the iOS HIG */
   .icon-btn { position: absolute; width: 44px; height: 44px; display: flex;
@@ -83,7 +98,12 @@
     background: rgba(6,10,18,0.55); border: none; border-radius: 12px;
     color: #cfe3ff; font-size: 19px; cursor: pointer; }
   .icon-btn:active { transform: scale(.94); }
-  #gear { top: calc(var(--sat) + 58px); right: calc(var(--sar) + 12px); }
+  /* Bottom-CENTRE, in the letterbox band BELOW the arena: out of the playfield,
+     clear of the scoreboard, and far from where a thumb rests. On the right it sat
+     inside the aim/fire zone, so aiming at the top-right corner opened settings
+     mid-fight (and in tilt mode the whole screen is the fire zone). */
+  #gear { bottom: calc(var(--sab) + 8px); left: 50%; margin-left: -22px;
+    background: rgba(6,10,18,0.7); }
 
   /* settings sheet */
   #sheet { position: fixed; inset: 0; z-index: 8; display: flex; align-items: flex-end;
@@ -98,7 +118,7 @@
   #sheet .row { display: flex; align-items: center; justify-content: space-between;
     padding: 12px 0; border-top: 1px solid #222b3c; font-size: 15px; }
   #sheet .seg { display: flex; gap: 6px; }
-  #sheet .seg button, #sheet .row > button { min-height: 36px; padding: 0 14px; border-radius: 9px;
+  #sheet .seg button, #sheet .row > button { min-height: 44px; padding: 0 14px; border-radius: 9px;
     border: 1px solid #33405c; background: transparent; color: #cfe3ff; font-size: 14px; cursor: pointer; }
   #sheet .seg button.sel { background: #1f8fd6; border-color: #1f8fd6; color: #06131f; font-weight: 700; }
   #sheet .seg button:disabled { opacity: .35; }
@@ -129,6 +149,15 @@
     opacity: 0; visibility: hidden; transition: opacity .2s, visibility 0s .2s; }
   #offline.on { opacity: 1; visibility: visible; transition-delay: 0s; }
   #offline small { font-size: 13px; letter-spacing: 0; color: #9fb4d0; }
+
+  /* The arena is 9:16. In landscape the fit-to-height zoom renders it as a ~220px
+     sliver in the middle of the screen, and the tilt axis mapping flips under the
+     player mid-match. Declare portrait and mean it. */
+  #rotate { position: fixed; inset: 0; z-index: 10; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; background: #0b0e14;
+    text-align: center; font-size: 17px; letter-spacing: 1px; color: #cfe3ff; }
+  #rotate span { font-size: 44px; }
+  @media (orientation: landscape) and (max-height: 560px) { #rotate { display: flex; } }
 </style>
 </head>
 <body>
@@ -138,12 +167,16 @@
   <div id="scores"></div>
   <div id="status"></div>
   <div id="respawn"><span>DESTROYED</span><small id="respawnIn"></small></div>
+  <div id="feed"></div>
+  <div id="killbanner"></div>
   <div id="toast"></div>
   <button id="calibrate">⟳ level tilt</button>
   <button id="gear" class="icon-btn" aria-label="Settings">⚙</button>
 </div>
 
 <div id="offline"><span>RECONNECTING</span><small id="offlineSub"></small></div>
+
+<div id="rotate"><span>📱</span><div>Rotate your device<br>to play in portrait</div></div>
 
 <div id="sheet">
   <div class="card">
@@ -156,6 +189,13 @@
     </div>
     <div class="row"><span>Sound</span><button id="optSound">On</button></div>
     <div class="row"><span>Vibration</span><button id="optHaptics">On</button></div>
+    <div class="row"><span>Screen shake</span>
+      <span class="seg">
+        <button id="shake0">Off</button>
+        <button id="shake1">Low</button>
+        <button id="shake2">Full</button>
+      </span>
+    </div>
     <div class="row"><span>Re-centre tilt</span><button id="optCal">Level now</button></div>
     <div class="row"><span>How to play</span><button id="optHelp">Show</button></div>
     <button class="close" id="sheetClose">DONE</button>

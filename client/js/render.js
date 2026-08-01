@@ -17,6 +17,19 @@ export const teamColor = (team) => TEAM_COLORS[team & 1];
 // Every fillStyle/strokeStyle assignment re-parses the CSS colour string, and
 // shade()/rgba() were rebuilding those strings ~14 times a frame. There are
 // exactly two teams — precompute the whole palette once at module load.
+// Respect the OS reduced-motion setting; overridable from the settings sheet.
+let shakeScale = 1;
+try {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) shakeScale = 0;
+  const stored = localStorage.getItem('tank.shake');
+  if (stored !== null) shakeScale = Number(stored);
+} catch { /* private mode */ }
+export function setShakeScale(v) {
+  shakeScale = v;
+  try { localStorage.setItem('tank.shake', String(v)); } catch { /* ignore */ }
+}
+export function getShakeScale() { return shakeScale; }
+
 const PALETTE = TEAM_COLORS.map((c) => ({
   base: c,
   hull: shade(c, -0.35),
@@ -135,9 +148,12 @@ export class Renderer {
   }
 
   // Impulse the camera. Directional when an angle is given (recoil), random otherwise.
+  // Scaled by the player's motion preference — 20px of rotating translation is a
+  // real vestibular trigger and a routine accessibility complaint.
   addShake(mag, ang) {
-    if (mag <= this.shakeMag) return;
-    this.shakeMag = mag;
+    const m = mag * shakeScale;
+    if (m <= this.shakeMag) return;
+    this.shakeMag = m;
     this.shakeAng = ang === undefined ? Math.random() * Math.PI * 2 : ang;
   }
 
@@ -238,7 +254,7 @@ export class Renderer {
     const shellR = Math.max(BULLET_RADIUS, 6 / cam.zoom);
     for (const b of state.bullets) {
       const mine = b.mine;
-      const tx = b.x - b.vx * 0.075, ty = b.y - b.vy * 0.075;
+      const tx = b.x - b.vx * 0.045, ty = b.y - b.vy * 0.045;
       ctx.strokeStyle = mine ? 'rgba(255,230,150,0.45)' : 'rgba(255,150,110,0.45)';
       ctx.lineWidth = 3.5;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
@@ -322,10 +338,19 @@ export class Renderer {
     const w = 54, h = 6;
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
     ctx.fillRect(-w / 2, top - h, w, h);
-    ctx.fillStyle = f > 0.5 ? color : f > 0.22 ? '#ffcf5e' : '#ff6b5e';
+    // Never draw a tower's health in its own team colour: RED's full-health bar
+    // (#ff7a5e) was 6 ΔRGB from the critical warning (#ff6b5e), so a tower at 100%
+    // and one at 10% looked identical — to trichromats, never mind deuteranopes.
+    // A luminance-separated ramp plus quarter notches encodes health redundantly.
+    ctx.fillStyle = f > 0.5 ? '#8ef5c0' : f > 0.25 ? '#ffd166' : '#ff4d4d';
     ctx.fillRect(-w / 2, top - h, w * f, h);
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
     ctx.lineWidth = 1;
+    for (let q = 1; q < 4; q++) {
+      const qx = -w / 2 + (w * q) / 4;
+      ctx.beginPath(); ctx.moveTo(qx, top - h); ctx.lineTo(qx, top); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
     ctx.strokeRect(-w / 2, top - h, w, h);
     ctx.restore();
 
