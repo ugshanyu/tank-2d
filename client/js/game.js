@@ -80,6 +80,8 @@ export class Game {
     this._hitNonces = new Map();   // fire nonce -> {victim, at}
     this._predDmg = new Map();     // id -> {hp, at} predicted health, see displayHp()
     this._meHist = [];             // our own recent rendered positions, see meAt()
+    this._myBids = new Set();      // server ids of shells I fired (for damage credit)
+    this.pendingAward = null;      // match result awaiting XP award
 
     // impulses the renderer/audio layer drains each frame
     this.shake = 0;               // screen-shake magnitude request, px
@@ -396,6 +398,14 @@ export class Game {
         }
         this.wins = msg.wins || [0, 0];
         this.phase = msg.phase || 'playing';
+        // Joining DURING a result screen used to render "undefined destroyed the
+        // tower", show DEFEAT unconditionally (winner -1 === myTeam 0 is false),
+        // and award a loss for a match this player never took part in.
+        this.winner = -1;
+        this.matchOverAt = performance.now();
+        this.matchDeaths = 0;
+        this.matchTowerDamage = 0;
+        this.pendingAward = null;
         // reconnect hygiene: drop state from the previous connection
         this.bullets.clear();
         this.predicted.clear();
@@ -406,6 +416,7 @@ export class Game {
         this._hitBids.clear();
         this._hitNonces.clear();
         this._predDmg.clear();
+        this._myBids.clear();
         this._resetMagazine();
         break;
       case 'join':
@@ -427,6 +438,15 @@ export class Game {
         this.shake = Math.max(this.shake, 20);
         this.hitstopMs = 90;
         this.events.push({ kind: msg.winner === this.myTeam ? 'win' : 'lose' });
+        // Snapshot the result HERE. Awarding from the render loop lost the whole
+        // match whenever the app was backgrounded across the match end — rAF is
+        // suspended, the server resets after 6s, and the overlay never flipped.
+        this.pendingAward = {
+          won: msg.winner === this.myTeam,
+          kills: this.meServer ? this.meServer.score : 0,
+          deaths: this.matchDeaths,
+          towerDamage: this.matchTowerDamage,
+        };
         // the arena is frozen server-side; drop shells so none linger on screen
         this.bullets.clear();
         this.predicted.clear();
@@ -460,6 +480,7 @@ export class Game {
           this._hitNonces.delete(msg.nonce);
           break;
         }
+        if (msg.id === this.myId) this._myBids.add(msg.bid);
         if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
           // my predicted bullet confirmed: hand it to the confirmed set under
           // the server's id, keeping its predicted position (continuity). Its
@@ -495,6 +516,9 @@ export class Game {
         // Only swallow the echo if it agrees with what we predicted. A shell we
         // called a tank hit that actually struck a TOWER used to lose the tower's
         // shake and sound entirely, and the objective took damage in silence.
+        const owned = this.bullets.get(msg.bid);
+        const wasMine = owned ? owned.owner === this.myId : this._myBids.has(msg.bid);
+        this._myBids.delete(msg.bid);
         if (this._hitBids.has(msg.bid)) {
           const predicted = this._hitBids.get(msg.bid);
           this._hitBids.delete(msg.bid);
@@ -507,7 +531,7 @@ export class Game {
         // using msg.x/msg.y made your own shell fly visibly past the impact and the
         // explosion pop back behind it — ~34px of separation at 80ms one-way.
         const local = this.bullets.get(msg.bid);
-        const mine = local ? local.owner === this.myId : false;
+        const mine = wasMine;
         const ex = local ? local.x : msg.x;
         const ey = local ? local.y : msg.y;
         this.bullets.delete(msg.bid);
@@ -540,6 +564,19 @@ export class Game {
           this.killBannerAt = performance.now();
           this.killBannerName = this.names.get(msg.victim) || '';
           this.events.push({ kind: 'kill' });
+        }
+        // Without this the 37-particle death burst only ever fired for YOUR own
+        // death: a remote tank just silently vanished.
+        if (msg.victim !== this.myId) {
+          const buf = this.remotes.get(msg.victim);
+          const last = buf && buf.length ? buf[buf.length - 1] : null;
+          if (last) {
+            this.effects.push({
+              kind: 'explosion', x: last.x, y: last.y,
+              born: performance.now(), dur: 600, team: last.team,
+            });
+            this.shake = Math.max(this.shake, 6);
+          }
         }
         this.feed.push({
           killer: this.names.get(msg.killer) || (msg.killer >= 200 ? 'Tower' : '?'),

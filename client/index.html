@@ -116,8 +116,15 @@
      clear of the scoreboard, and far from where a thumb rests. On the right it sat
      inside the aim/fire zone, so aiming at the top-right corner opened settings
      mid-fight (and in tilt mode the whole screen is the fire zone). */
+  /* The letterbox band is (vh - 1280*zoom)/2 — on a 375x667 screen or a short
+     host iframe that is ZERO, so "put it in the band" silently placed the button
+     on top of BLUE's tower and spawn. main.js measures the band at runtime and
+     only uses it when there is genuinely room; otherwise the button tucks into
+     the top-right corner, which is wall, not playfield. */
   #gear { bottom: calc(var(--sab) + 8px); left: 50%; margin-left: -22px;
-    background: rgba(6,10,18,0.7); }
+    background: rgba(6,10,18,0.7); opacity: .8; }
+  :root.noband #gear { bottom: auto; left: auto; margin-left: 0;
+    top: calc(var(--sat) + 56px); right: calc(var(--sar) + 12px); }
 
   /* settings sheet */
   #sheet { position: fixed; inset: 0; z-index: 8; display: flex; align-items: flex-end;
@@ -162,7 +169,9 @@
     background: rgba(6,10,18,.62); font-size: 17px; letter-spacing: 2px; color: #ff8a80;
     opacity: 0; visibility: hidden; transition: opacity .2s, visibility 0s .2s; }
   #offline.on { opacity: 1; visibility: visible; transition-delay: 0s; }
-  #offline small { font-size: 13px; letter-spacing: 0; color: #9fb4d0; }
+  #offline small { font-size: 13px; letter-spacing: 0; color: #9fb4d0;
+    max-width: 280px; text-align: center; line-height: 1.4; }
+  #offline.fatal { background: rgba(6,10,18,.88); }
 
   /* The arena is 9:16. In landscape the fit-to-height zoom renders it as a ~220px
      sliver in the middle of the screen, and the tilt axis mapping flips under the
@@ -171,7 +180,7 @@
     align-items: center; justify-content: center; gap: 14px; background: #0b0e14;
     text-align: center; font-size: 17px; letter-spacing: 1px; color: #cfe3ff; }
   #rotate span { font-size: 44px; }
-  @media (orientation: landscape) and (max-height: 560px) { #rotate { display: flex; } }
+  @media (orientation: landscape) { #rotate { display: flex; } }
 </style>
 </head>
 <body>

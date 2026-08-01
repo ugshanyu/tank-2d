@@ -6,7 +6,7 @@
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
 import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
-  TANK_RADIUS, BULLET_RADIUS, MAX_HP, OWNER_GRACE,
+  TANK_RADIUS, BULLET_RADIUS, MAX_HP, OWNER_GRACE, MAG_SIZE,
 } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
@@ -45,6 +45,15 @@ function segPointDist(x1, y1, x2, y2, cx, cy) {
 // Safe-area insets are 0 inside a nested browsing context. If we are framed, fall
 // back to values that clear a notch/Dynamic Island and the home indicator.
 if (window.self !== window.top) document.documentElement.classList.add('framed');
+
+// Where can the settings button live without sitting on the playfield? Depends
+// entirely on the letterbox band, which is 0 on a 16:9 screen or a short iframe.
+function placeGear() {
+  const band = (window.innerHeight - 1280 * Math.min(window.innerWidth / 720, window.innerHeight / 1280)) / 2;
+  document.documentElement.classList.toggle('noband', band < 58);
+}
+placeGear();
+window.addEventListener('resize', placeGear);
 
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
@@ -140,6 +149,9 @@ function armFirstGesture() {
 // wake locks release when the page hides — take it back on return
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && started) acquireWakeLock();
+  // rAF is suspended while hidden, so a match that ended in the background never
+  // reached showScorecard(). Settle the XP either way.
+  if (game && game.pendingAward) drainAward();
 });
 
 // Queued, not single-slot. The old version cleared and overwrote, so on a solo
@@ -296,15 +308,22 @@ function startNet(resolveUrl) {
       if (m.t === 'matchstart') toast('New match — go!', 1600);
       if (m.t === 'error') toast(m.reason, 4000);
     },
-    onStatus: (s) => {
+    onStatus: (s, reason) => {
       EL.status.innerHTML = s === 'connected'
         ? `<span id="pingv"></span>`
-        : `<span class="bad">${s}…</span>`;
+        : `<span class="bad">${s === 'failed' ? 'offline' : s + '…'}</span>`;
       // A frozen arena that still renders as if live is indistinguishable from lag,
       // so the player keeps mashing a dead game. Make "frozen" legible.
       const off = s !== 'connected';
       EL.offline.classList.toggle('on', off);
-      if (off) EL.offlineSub.textContent = s === 'connecting' ? 'joining the match…' : 'trying to get you back in…';
+      EL.offline.classList.toggle('fatal', s === 'failed');
+      if (s === 'failed') {
+        EL.offline.firstElementChild.textContent = 'CANNOT CONNECT';
+        EL.offlineSub.textContent = reason || '';
+      } else if (off) {
+        EL.offline.firstElementChild.textContent = 'RECONNECTING';
+        EL.offlineSub.textContent = s === 'connecting' ? 'joining the match…' : 'trying to get you back in…';
+      }
     },
   });
   game.net = net;
@@ -480,23 +499,31 @@ function drainFeedback() {
 
 // Post-match scorecard + XP. Awarded exactly once per match, when the result
 // screen first appears — updateHud runs on a timer, so this must be idempotent.
-function showScorecard() {
-  const kills = game.meServer ? game.meServer.score : 0;
-  const deaths = game.matchDeaths;
-  const towerDamage = game.matchTowerDamage;
-  EL.stKills.textContent = kills;
-  EL.stDeaths.textContent = deaths;
-  EL.stTower.textContent = towerDamage;
+function drainAward() {
+  const a = game.pendingAward;
+  if (!a) return null;
+  game.pendingAward = null;
+  return awardMatch(a);
+}
 
-  const res = awardMatch({ won: game.winner === game.myTeam, kills, deaths, towerDamage });
+function showScorecard() {
+  const a = game.pendingAward;
+  const res = drainAward();
+  if (!res) return;                     // already awarded (e.g. while backgrounded)
+  EL.stKills.textContent = a.kills;
+  EL.stDeaths.textContent = a.deaths;
+  EL.stTower.textContent = a.towerDamage;
   EL.xpLevel.textContent = res.levelledUp ? `LEVEL UP — LV ${res.level}` : `LV ${res.level}`;
   EL.xpGain.textContent = `+${res.gained} XP`;
-  // start from zero so the bar visibly fills rather than appearing pre-filled
+  // Kill the transition for one frame, otherwise the bar animates from the
+  // PREVIOUS match's fill: setting 0% only starts a 0.9s transition toward 0.
+  EL.xpFill.style.transition = 'none';
   EL.xpFill.style.width = '0%';
-  requestAnimationFrame(() => {
-    EL.xpFill.style.width = `${Math.round((res.intoLevel / res.levelSpan) * 100)}%`;
-  });
+  void EL.xpFill.offsetWidth;
+  EL.xpFill.style.transition = '';
+  EL.xpFill.style.width = `${Math.round((res.intoLevel / res.levelSpan) * 100)}%`;
   if (res.levelledUp) sfx.play('win');
+  if (!res.saved) toast('Progress can only be saved outside private browsing', 3000);
   game.matchDeaths = 0;
   game.matchTowerDamage = 0;
 }
@@ -538,7 +565,7 @@ function updateHud() {
   // Match result overlay. Toggling a CSS class (not style.display) so it can
   // actually animate — `display` is not transitionable, so every overlay used to
   // appear as a hard cut.
-  const over = game.phase === 'over';
+  const over = game.phase === 'over' && game.winner >= 0;
   if (EL.match.__on !== over) {
     EL.match.__on = over;
     EL.match.classList.toggle('on', over);
@@ -638,6 +665,9 @@ function startSoloPractice() {
       effects,
       joy: input.joy,
       joyMax: input.joyMax,
+      showAim: input.hasAim,
+      ammo: MAG_SIZE,
+      reloading: false,
       dt: dt || 1 / 60,
       lastFireAt: lastSoloFire,
       reload: Math.min(1, (now / 1000 - (nextFireAt - FIRE_COOLDOWN)) / FIRE_COOLDOWN),

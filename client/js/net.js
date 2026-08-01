@@ -6,6 +6,18 @@ import {
   MSG, DT, INTERP_DELAY_MS, decodeSnapshot, decodePong, encodeInput, encodePing,
 } from '../shared/protocol.js';
 
+const MAX_ATTEMPTS = 6;
+// Close codes the server actually sends (server.js) mapped to something a player
+// can act on. 4002 in particular means the platform token was rejected — retrying
+// will never help, and it is the single most likely production failure.
+const FATAL = {
+  4002: "Couldn't verify your session. Close and reopen the game from the app.",
+  4001: 'That match is full.',
+  4003: 'This game cannot be played from here.',
+  4000: 'The server did not respond in time.',
+  1013: 'Servers are busy right now. Try again in a moment.',
+};
+
 export class Net {
   // `resolveUrl` is an async () => wsUrl-with-token, called on every (re)connect
   // so a fresh access token is minted each time — platform tokens are short
@@ -21,6 +33,8 @@ export class Net {
     this.rtt = 0;
     this.closedByUs = false;
     this.backoff = 500;
+    this.attempts = 0;
+    this.lastCloseCode = 0;
     // server-clock estimate: serverNowMs ≈ performance.now() + clockOffset
     this.clockOffset = 0;
     this._clockInit = false;
@@ -64,6 +78,7 @@ export class Net {
 
     ws.onopen = () => {
       this.backoff = 500;
+      this.attempts = 0;
       // re-anchor the server-clock estimate on every (re)connection: a
       // restarted server's tick time can be far BELOW the old estimate, and
       // the EMA only corrects downward slowly
@@ -98,8 +113,11 @@ export class Net {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.connected = false;
+      this.lastCloseCode = ev && ev.code ? ev.code : 0;
+      // An auth rejection is terminal by definition — do not burn six retries.
+      if (FATAL[this.lastCloseCode] && this.lastCloseCode !== 1013) this.attempts = MAX_ATTEMPTS;
       clearInterval(this._pingTimer);
       if (this.closedByUs) return;
       this._scheduleReconnect();
@@ -107,8 +125,18 @@ export class Net {
     ws.onerror = () => { /* onclose follows */ };
   }
 
+  // Retrying forever with one generic "reconnecting…" made a misconfigured token,
+  // a full server and a subway tunnel indistinguishable — to the player AND to
+  // whoever is on call. Give up eventually, and say WHY.
   _scheduleReconnect() {
     if (this.closedByUs) return;
+    this.attempts += 1;
+    if (this.attempts > MAX_ATTEMPTS) {
+      const reason = FATAL[this.lastCloseCode] || 'Lost connection. Check your network and reopen.';
+      console.error(`[net] giving up after ${this.attempts} attempts (close ${this.lastCloseCode}): ${reason}`);
+      this.onStatus('failed', reason);
+      return;
+    }
     this.onStatus('reconnecting');
     setTimeout(() => this.connect(), this.backoff);
     this.backoff = Math.min(5000, this.backoff * 1.7);

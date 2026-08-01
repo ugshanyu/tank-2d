@@ -4,6 +4,7 @@
 // Run: npm test
 
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import WebSocket from 'ws';
 import {
   MSG, DT, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
@@ -238,12 +239,119 @@ async function checkProfile() {
 
   store.set('tank.profile', '{{{not json');
   check(load().xp === 0, 'corrupt saved profile falls back to blank instead of throwing');
+
+  // A tampered/overflowed save used to hang the tab forever at the result screen.
+  store.set('tank.profile', '{"xp":1e309,"matches":"x","wins":-5}');
+  const t0 = Date.now();
+  const p2 = load();
+  check(Date.now() - t0 < 500 && p2.xp === 0 && p2.wins === 0,
+    'a non-finite/garbage saved profile cannot hang the level loop');
+  check(levelFromXp(Infinity) < 500 && levelFromXp(NaN) === 1, 'levelFromXp is bounded for non-finite input');
+}
+
+// The match result must be captured on the EVENT and awarded exactly once, even
+// if the app was backgrounded across the end of the match (rAF is suspended, and
+// the server resets the match 6s later — the whole match used to vanish).
+async function checkAward() {
+  const { Game } = await import('../client/js/game.js');
+  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g.myId = 1; g.myTeam = 0;
+  g.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 4 };
+  g.matchDeaths = 2;
+  g.matchTowerDamage = 140;
+
+  g.onEvent({ t: 'matchover', winner: 0, wins: [1, 0] });
+  check(!!g.pendingAward, 'the match result is captured on the event, not on the next frame');
+  check(g.pendingAward.won === true && g.pendingAward.kills === 4
+        && g.pendingAward.deaths === 2 && g.pendingAward.towerDamage === 140,
+    'the captured result carries the real per-match stats');
+
+  // matchstart wipes the live counters; the pending award must survive it
+  g.onEvent({ t: 'matchstart', wins: [1, 0] });
+  check(!!g.pendingAward && g.pendingAward.kills === 4,
+    'the pending award survives the match reset that follows it');
+
+  // joining DURING a result screen must not render or award someone else's match
+  const g2 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g2.onEvent({ t: 'welcome', id: 1, team: 0, players: [], wins: [3, 2], phase: 'over' });
+  check(g2.winner === -1 && !g2.pendingAward,
+    'joining mid-result screen awards nothing and has no winner to render');
+}
+
+// THE PRODUCTION AUTH PATH. Every other test in this file runs with
+// DEV_ALLOW_UNSIGNED=1, so the RS256/JWKS branch — the only one real users ever
+// touch — had zero coverage. A claim-shape mismatch against what the backend
+// actually mints is a total outage, and the client's symptom is an indefinite
+// "reconnecting" spinner. This signs real tokens with a local keypair and serves
+// a JWKS over a stub so the whole branch is exercised.
+async function checkAuth() {
+  const { generateKeyPair, exportJWK, SignJWT } = await import('jose');
+  const { validateAccessToken } = await import('./auth.js');
+
+  const { publicKey, privateKey } = await generateKeyPair('RS256');
+  const jwk = await exportJWK(publicKey);
+  jwk.kid = 'test-key-1';
+  jwk.alg = 'RS256';
+  jwk.use = 'sig';
+
+  const jwksServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ keys: [jwk] }));
+  });
+  await new Promise((r) => jwksServer.listen(8125, '127.0.0.1', r));
+  const jwksUrl = 'http://127.0.0.1:8125/.well-known/jwks.json';
+  const opts = { jwksUrl, serviceId: 'tank' };
+
+  const sign = (claims, over = {}) => new SignJWT(claims)
+    .setProtectedHeader({ alg: 'RS256', kid: 'test-key-1' })
+    .setIssuedAt()
+    .setIssuer(over.iss ?? 'usion-backend')
+    .setAudience(over.aud ?? 'usion-game-service:tank')
+    .setExpirationTime(over.exp ?? '30m')
+    .sign(privateKey);
+
+  const GOOD = { sub: 'user-42', room_id: 'r1', session_id: 's1', service_id: 'tank', permissions: ['play'] };
+
+  try {
+    const claims = await validateAccessToken(await sign(GOOD), opts);
+    check(claims.sub === 'user-42' && claims.room_id === 'r1',
+      `a correctly-minted RS256 token is accepted (sub=${claims.sub} room=${claims.room_id})`);
+  } catch (e) {
+    check(false, `a correctly-minted RS256 token is accepted — REJECTED: ${e.message}`);
+  }
+
+  const rejects = async (label, token) => {
+    try { await validateAccessToken(token, opts); check(false, `rejects ${label}`); }
+    catch { check(true, `rejects ${label}`); }
+  };
+  await rejects('a wrong issuer', await sign(GOOD, { iss: 'evil' }));
+  await rejects('a wrong audience (another game service)', await sign(GOOD, { aud: 'usion-game-service:chess' }));
+  await rejects('a mismatched service_id claim', await sign({ ...GOOD, service_id: 'chess' }));
+  await rejects("a token without the 'play' permission", await sign({ ...GOOD, permissions: ['spectate'] }));
+  await rejects('a token with no permissions array', await sign({ ...GOOD, permissions: undefined }));
+  await rejects('a token missing room_id', await sign({ ...GOOD, room_id: undefined }));
+  await rejects('a token missing session_id', await sign({ ...GOOD, session_id: undefined }));
+  await rejects('an expired token', await sign(GOOD, { exp: Math.floor(Date.now() / 1000) - 120 }));
+  await rejects('a dev token when the bypass is off', 'dev:someone:room');
+  await rejects('garbage', 'not-a-jwt');
+
+  // A token signed by a key the JWKS does not publish must never pass.
+  const other = await generateKeyPair('RS256');
+  const forged = await new SignJWT(GOOD)
+    .setProtectedHeader({ alg: 'RS256', kid: 'test-key-1' })
+    .setIssuedAt().setIssuer('usion-backend').setAudience('usion-game-service:tank')
+    .setExpirationTime('30m').sign(other.privateKey);
+  await rejects('a token signed by an unknown key', forged);
+
+  await new Promise((r) => jwksServer.close(r));
 }
 
 async function main() {
   checkProtocol();
   await checkInstantHits();
   await checkProfile();
+  await checkAuth();
+  await checkAward();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
   const srv = await startServer(PORT, { BOTS: '0' });
