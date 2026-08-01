@@ -12,8 +12,8 @@ and no off-screen threat.
 ## Match rules
 
 - **Two teams**, BLUE (bottom) and RED (top), max 4 players. Joiners are
-  auto-balanced onto the smaller team, so 1v1, 2v1 and 2v2 all play — nobody
-  waits in a lobby.
+  auto-balanced onto the smaller team, and **empty seats are filled with bots**,
+  so a solo launch is still a real 2v2 and nobody waits in a lobby.
 - **Each team has a tower.** Destroy the enemy tower (400 HP, 12 shells) and your
   team wins the match; it restarts automatically after 6 s. Kills are pressure,
   not the objective.
@@ -24,6 +24,29 @@ and no off-screen threat.
 - **Friendly fire is on**, including on your own tower. A teamkill scores nothing.
 - Tanks and shells both collide with towers; shells *detonate* on a tower rather
   than bouncing off it, which is how a tower takes damage.
+
+## Bots
+
+A lone player is topped up to 2v2 with three bots, one of each archetype
+(`server/bot.js`). A human always outranks a bot for a seat: when someone joins a
+full room a bot is dropped from the larger team, and when the last human leaves
+every bot goes with them so abandoned rooms don't simulate forever.
+
+| Bot | Behaviour |
+|---|---|
+| **Blitz** | Drives at the enemy tower and sieges it, trading lives for damage |
+| **Stalker** | Hunts the nearest enemy tank and duels it at mid range; the most accurate |
+| **Bulwark** | Orbits its own tower and intercepts anything that comes for it |
+
+All three lead their shots, strafe while engaged, hold fire when a teammate is in
+the line (friendly fire is on), fall back toward their own tower below ~34% HP,
+and have per-profile aim error so they miss like people do.
+
+Bots are **not** part of the deterministic shared sim — they only synthesise an
+input packet each tick, which then runs through the same `stepTank`/`tryFire`
+path as a human's. So the client needs no bot code at all: a bot is just another
+tank in the snapshot and another `fire` event on the wire. Set `BOTS=0` to run a
+bot-free server (the scripted half of `npm test` does exactly that).
 
 - **Play**: launch from the Usion app (a game invite in chat, or Explore). The game
   starts immediately — no tap-to-start screen. Tilt to drive and touch to shoot;

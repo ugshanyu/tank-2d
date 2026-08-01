@@ -10,8 +10,8 @@ import {
   TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
 } from '../client/shared/protocol.js';
 
-const PORT = 8123;
-const URL = `ws://127.0.0.1:${PORT}`;
+const PORT = 8123;       // deterministic scripted match — bots disabled
+const BOT_PORT = 8124;   // second instance with bots on
 let failures = 0;
 
 function check(cond, label) {
@@ -20,9 +20,26 @@ function check(cond, label) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function startServer(port, extraEnv = {}) {
+  const srv = spawn('node', ['server/server.js'], {
+    env: {
+      ...process.env, PORT: String(port),
+      NODE_ENV: 'development', DEV_ALLOW_UNSIGNED: '1', ...extraEnv,
+    },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  await new Promise((resolve, reject) => {
+    srv.stdout.on('data', (d) => { if (String(d).includes('TANK server')) resolve(); });
+    srv.on('exit', () => reject(new Error('server died')));
+    setTimeout(() => reject(new Error('server start timeout')), 5000);
+  });
+  return srv;
+}
+
 class Bot {
-  constructor(name) {
+  constructor(name, port = PORT) {
     this.name = name;
+    this.port = port;
     this.id = 0;
     this.seq = 0;
     this.nonce = 0;
@@ -38,7 +55,7 @@ class Bot {
       // frame now carries only the (cosmetic) display name.
       const userId = this.name.replace(/[^\w-]/g, '-');
       const token = `dev:${userId}:${room}`;
-      const ws = new WebSocket(`${URL}/ws?token=${encodeURIComponent(token)}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${this.port}/ws?token=${encodeURIComponent(token)}`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const to = setTimeout(() => reject(new Error('connect timeout')), 4000);
@@ -104,15 +121,8 @@ async function goTo(bot, tx, ty, maxTicks = 900) {
 
 async function main() {
   console.log('starting server…');
-  const srv = spawn('node', ['server/server.js'], {
-    env: { ...process.env, PORT: String(PORT), NODE_ENV: 'development', DEV_ALLOW_UNSIGNED: '1' },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  await new Promise((resolve, reject) => {
-    srv.stdout.on('data', (d) => { if (String(d).includes('TANK server')) resolve(); });
-    srv.on('exit', () => reject(new Error('server died')));
-    setTimeout(() => reject(new Error('server start timeout')), 5000);
-  });
+  // Bots off here: they would join the scripted match and wreck its assertions.
+  const srv = await startServer(PORT, { BOTS: '0' });
 
   try {
     // ---- join ----
@@ -236,8 +246,68 @@ async function main() {
     srv.kill();
   }
 
+  await botPhase();
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+// Second instance, bots ENABLED: a lone human must be topped up to a real 2v2
+// with three distinct bots, the bots must actually play, and a bot must yield
+// its seat the moment another human arrives.
+async function botPhase() {
+  console.log('\nstarting bot server…');
+  const srv = await startServer(BOT_PORT);
+  try {
+    const solo = new Bot('solo', BOT_PORT);
+    await solo.connect('botroom');
+    await sleep(700);
+
+    const tanks = solo.snap.tanks;
+    check(tanks.length === 4, `lone player topped up to 2v2 (${tanks.length} tanks)`);
+
+    const botJoins = solo.ev('join').filter((e) => e.bot);
+    check(botJoins.length === 3, `3 bots joined (${botJoins.length})`);
+    const names = botJoins.map((e) => e.name);
+    check(new Set(names).size === 3, `3 DIFFERENT bots (${names.join(', ')})`);
+
+    const myTeam = solo.ev('welcome')[0].team;
+    const mine = tanks.filter((t) => t.team === myTeam).length;
+    check(mine === 2 && tanks.length - mine === 2, `sides balanced 2v2 (${mine} v ${tanks.length - mine})`);
+
+    // ---- do they actually play? ----
+    const before = tanks.filter((t) => t.id !== solo.id).map((t) => ({ id: t.id, x: t.x, y: t.y }));
+    await sleep(4000);
+    const after = solo.snap.tanks;
+    const moved = before.filter((b) => {
+      const a = after.find((t) => t.id === b.id);
+      return a && Math.hypot(a.x - b.x, a.y - b.y) > 40;
+    }).length;
+    check(moved >= 2, `bots are driving (${moved}/3 moved >40px)`);
+    const botShots = solo.ev('fire').filter((e) => e.id !== solo.id && e.id < TOWER_OWNER_BASE);
+    check(botShots.length > 0, `bots are shooting (${botShots.length} shots)`);
+
+    // ---- a human outranks a bot for a seat ----
+    const leavesBefore = solo.ev('leave').length;
+    const second = new Bot('human2', BOT_PORT);
+    await second.connect('botroom');
+    await sleep(500);
+    check(solo.ev('leave').length === leavesBefore + 1, 'a bot gave up its seat for the 2nd human');
+    check(solo.snap.tanks.length === 4, `still exactly 4 tanks (${solo.snap.tanks.length})`);
+
+    // ---- room drains when the humans leave (bots must not simulate forever) ----
+    solo.close();
+    second.close();
+    await sleep(600);
+    const revisit = new Bot('later', BOT_PORT);
+    await revisit.connect('botroom');
+    await sleep(700);
+    check(revisit.id === 1, `abandoned room reclaimed, ids reset (got ${revisit.id})`);
+    check(revisit.snap.tanks.length === 4, `refilled to 2v2 for the newcomer (${revisit.snap.tanks.length})`);
+    revisit.close();
+  } finally {
+    srv.kill();
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

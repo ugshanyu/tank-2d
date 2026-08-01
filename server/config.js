@@ -18,6 +18,10 @@ export const JWKS_URL = env.JWKS_URL || `${API_URL}/.well-known/jwks.json`;
 // play without the platform minting a real RS256 token. NEVER in production.
 export const DEV_ALLOW_UNSIGNED = bool(env.DEV_ALLOW_UNSIGNED || '');
 
+// Fill empty slots with bots so a solo launch is still a real 2v2. Set BOTS=0
+// to run a bot-free server (the deterministic half of the smoke test does).
+export const BOTS_ENABLED = (env.BOTS ?? '1') !== '0';
+
 // Optional browser-origin allowlist (comma-separated). Unset = allow all.
 export const ALLOWED_ORIGINS = (env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);

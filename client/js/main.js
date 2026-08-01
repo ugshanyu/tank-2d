@@ -254,7 +254,8 @@ function updateHud() {
       + `${TEAM_NAMES[team]}${team === game.myTeam ? ' (you)' : ''} · tower ${pct}%</div>`;
     for (const r of rows) {
       if (r.team !== team) continue;
-      html += `<div class="row ${r.me ? 'me' : ''}"><span>${esc(r.name)}</span><span>${r.score}</span></div>`;
+      const tag = r.bot ? '<i>bot</i>' : '';
+      html += `<div class="row ${r.me ? 'me' : ''}"><span>${esc(r.name)}${tag}</span><span>${r.score}</span></div>`;
     }
   }
   const el = $('scores');

@@ -17,8 +17,9 @@ import {
   decodeInput, encodeSnapshot, encodePong,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
+import { botInput, BOT_PROFILES } from './bot.js';
 import { validateAccessToken } from './auth.js';
-import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS } from './config.js';
+import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS, BOTS_ENABLED } from './config.js';
 
 const MAX_CONNS = 128;
 const MAX_ROOMS = 32;
@@ -56,10 +57,60 @@ class Room {
     return best;
   }
   towerHp() { return this.towers.map((t) => Math.max(0, t.hp)); }
+  humans() { let n = 0; for (const p of this.players.values()) if (!p.isBot) n++; return n; }
   broadcastJson(obj) {
     const s = JSON.stringify(obj);
-    for (const p of this.players.values()) if (p.ws.readyState === 1) p.ws.send(s);
+    for (const p of this.players.values()) if (p.ws && p.ws.readyState === 1) p.ws.send(s);
   }
+}
+
+// ---------- bots ----------
+// Empty seats are filled with bots so a solo launch is a real 2v2, and freed the
+// instant a human wants one. A room with no humans left keeps no bots — otherwise
+// abandoned rooms would simulate forever.
+function addBot(room) {
+  const id = room.freeId();
+  if (!id) return false;
+  const used = new Set();
+  for (const p of room.players.values()) if (p.isBot) used.add(p.profile.key);
+  const profile = BOT_PROFILES.find((b) => !used.has(b.key)) || BOT_PROFILES[0];
+  const team = room.pickTeam();
+  const s = pickSpawn(room, team);
+  const bot = {
+    id, userId: `bot:${room.id}:${id}`, name: profile.name, ws: null,
+    isBot: true, profile,
+    tank: makeTank(id, s.x, s.y, team),
+    inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
+    nextFireAt: -10, respawnAt: 0,
+    ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1 },
+  };
+  room.players.set(id, bot);
+  room.broadcastJson({ t: 'join', id, name: bot.name, team, bot: true });
+  return true;
+}
+
+function dropBot(room) {
+  // drop from the largest team so removing a bot leaves the sides balanced
+  const counts = new Array(TEAM_COUNT).fill(0);
+  for (const p of room.players.values()) counts[p.tank.team]++;
+  let victim = null;
+  for (const p of room.players.values()) {
+    if (!p.isBot) continue;
+    if (!victim || counts[p.tank.team] > counts[victim.tank.team]) victim = p;
+  }
+  if (!victim) return false;
+  room.players.delete(victim.id);
+  room.bullets = room.bullets.filter((b) => b.owner !== victim.id);
+  room.broadcastJson({ t: 'leave', id: victim.id });
+  return true;
+}
+
+function ensureBots(room) {
+  if (!BOTS_ENABLED || room.humans() === 0) {
+    for (const p of [...room.players.values()]) if (p.isBot) room.players.delete(p.id);
+    return;
+  }
+  while (room.players.size < MAX_PLAYERS_PER_ROOM && addBot(room)) { /* fill */ }
 }
 
 function getRoom(id) {
@@ -101,6 +152,18 @@ function stepRoom(room) {
 
   // 1. apply queued inputs (each input == one client tick of movement)
   for (const p of room.players.values()) {
+    // Bots synthesise their input instead of receiving it, then run through the
+    // exact same movement + firing path as a human packet.
+    if (p.isBot) {
+      const inp = botInput(room, p, tick);
+      p.turret = inp.aim;
+      p.tank.turret = inp.aim;
+      if (p.tank.alive) {
+        stepTank(p.tank, inp, DT);
+        if (inp.firing) tryFire(room, p, inp);
+      }
+      continue;
+    }
     p.turret = p.pendingAim ?? p.turret;
     let n = 0;
     while (p.inputQueue.length > 0 && n < INPUTS_PER_TICK) {
@@ -176,7 +239,7 @@ function sendSnapshots(room) {
   for (const p of room.players.values()) tanks.push(p.tank);
   const towerHp = room.towerHp();
   for (const p of room.players.values()) {
-    if (p.ws.readyState !== 1) continue;
+    if (!p.ws || p.ws.readyState !== 1) continue;
     if (p.ws.bufferedAmount > 64 * 1024) continue; // don't pile onto a choked socket
     p.ws.send(encodeSnapshot(tick, p.lastAckSeq, p.id, tanks, towerHp));
   }
@@ -409,11 +472,14 @@ wss.on('connection', (ws, req) => {
         // A user reconnecting (new socket, same token identity) must not occupy
         // two slots — retire any prior tank they hold in this room first.
         for (const [pid, existing] of [...r.players]) {
+          if (existing.isBot) continue;
           if (existing.userId === auth.sub) {
             r.players.delete(pid);
             try { existing.ws.close(4008, 'replaced by newer session'); } catch { /* already gone */ }
           }
         }
+        // a human always outranks a bot for a seat
+        if (!r.freeId()) dropBot(r);
         const id = r.freeId();
         if (!id) { ws.send(JSON.stringify({ t: 'error', reason: 'room full' })); ws.close(4001); return; }
         clearTimeout(helloTimer);
@@ -430,9 +496,10 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({
           t: 'welcome', id, team, room: roomId, tick, tickRate: TICK_RATE,
           wins: room.wins, phase: room.phase,
-          players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, team: p.tank.team })),
+          players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, team: p.tank.team, bot: !!p.isBot })),
         }));
         room.broadcastJson({ t: 'join', id, name, team });
+        ensureBots(room); // top the match back up to 2v2
       }
       return;
     }
@@ -462,6 +529,9 @@ wss.on('connection', (ws, req) => {
       room.bullets = room.bullets.filter((b) => b.owner !== player.id);
       for (const b of orphaned) room.broadcastJson({ t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y), hit: 0 });
       room.broadcastJson({ t: 'leave', id: player.id });
+      // refill for whoever is left — and if that was the last human, ensureBots
+      // clears the bots so the abandoned room can be reclaimed below
+      ensureBots(room);
       if (room.players.size === 0) { rooms.delete(room.id); }
     }
   });

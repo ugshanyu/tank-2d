@@ -27,6 +27,7 @@ export class Game {
     this.myTeam = 0;
     this.names = new Map();       // id -> name
     this.teams = new Map();       // id -> team
+    this.bots = new Set();        // ids that are server-run bots
 
     // match state (2v2 objective mode)
     this.towerHp = [TOWER_HP, TOWER_HP];
@@ -179,7 +180,12 @@ export class Game {
         this.myTeam = msg.team ?? 0;
         this.names.clear();
         this.teams.clear();
-        for (const p of msg.players) { this.names.set(p.id, p.name); this.teams.set(p.id, p.team ?? 0); }
+        this.bots.clear();
+        for (const p of msg.players) {
+          this.names.set(p.id, p.name);
+          this.teams.set(p.id, p.team ?? 0);
+          if (p.bot) this.bots.add(p.id);
+        }
         this.wins = msg.wins || [0, 0];
         this.phase = msg.phase || 'playing';
         // reconnect hygiene: drop state from the previous connection
@@ -191,10 +197,12 @@ export class Game {
       case 'join':
         this.names.set(msg.id, msg.name);
         this.teams.set(msg.id, msg.team ?? 0);
+        if (msg.bot) this.bots.add(msg.id); else this.bots.delete(msg.id);
         break;
       case 'leave':
         this.names.delete(msg.id);
         this.teams.delete(msg.id);
+        this.bots.delete(msg.id);
         this.remotes.delete(msg.id);
         break;
       case 'matchover':
@@ -323,7 +331,7 @@ export class Game {
     if (this.meServer) {
       rows.push({
         id: this.myId, name: this.names.get(this.myId) || 'you',
-        score: this.meServer.score, team: this.meServer.team ?? this.myTeam, me: true,
+        score: this.meServer.score, team: this.meServer.team ?? this.myTeam, me: true, bot: false,
       });
     }
     for (const [id, buf] of this.remotes) {
@@ -331,7 +339,7 @@ export class Game {
       const last = buf[buf.length - 1];
       rows.push({
         id, name: this.names.get(id) || '?', score: last.score,
-        team: last.team ?? this.teams.get(id) ?? 0, me: false,
+        team: last.team ?? this.teams.get(id) ?? 0, me: false, bot: this.bots.has(id),
       });
     }
     rows.sort((x, y) => (x.team - y.team) || (y.score - x.score));
