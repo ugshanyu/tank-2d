@@ -5,18 +5,22 @@
 // ---- Simulation constants (must match on client & server) ----
 export const TICK_RATE = 60;            // fixed simulation tick (Hz), client & server
 export const DT = 1 / TICK_RATE;
-export const ARENA_W = 2400;
-export const ARENA_H = 1600;
+// Single-screen portrait arena (9:16). The whole map is always visible on a
+// phone — the camera never moves, only the tanks do. Speeds below are tuned to
+// this size: the arena is ~3x narrower than a scrolling map, so the old px/s
+// values would cross it in under a second and play like pinball.
+export const ARENA_W = 720;
+export const ARENA_H = 1280;
 
 export const TANK_RADIUS = 26;
-export const TANK_MAX_SPEED = 280;      // px/s
-export const TANK_ACCEL = 1400;         // px/s^2 toward target velocity
+export const TANK_MAX_SPEED = 130;      // px/s (~5.5 s to cross the arena)
+export const TANK_ACCEL = 700;          // px/s^2 toward target velocity
 export const HULL_TURN_RATE = 10;       // rad/s hull visually turns toward velocity
 export const MAX_HP = 100;
 
-export const BULLET_SPEED = 660;        // px/s
+export const BULLET_SPEED = 420;        // px/s
 export const BULLET_RADIUS = 5;
-export const BULLET_TTL = 1.5;          // seconds
+export const BULLET_TTL = 2.2;          // seconds (must outlast a cross-arena shot + bounce)
 export const BULLET_MAX_BOUNCES = 1;    // dies on 2nd wall contact
 export const BULLET_DAMAGE = 34;
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)

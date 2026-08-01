@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "tank",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["server/server.js"],
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "DEV_ALLOW_UNSIGNED=1 node server/server.js"],
       "port": 8080
     }
   ]

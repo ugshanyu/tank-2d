@@ -22,10 +22,12 @@ const me = { userId: null, userName: '', embedded: false, roomId: null };
 let net = null;
 let game = null;
 let netStarted = false;
-let started = false;              // PLAY tapped
+let started = false;              // game loop running
 
 // ---------------------------------------------------------------- Usion boot --
 function boot() {
+  // No start screen to look at while the SDK settles — say something immediately.
+  $('status').innerHTML = '<span>starting…</span>';
   const U = window.Usion;
   if (U && typeof U.init === 'function') {
     let done = false;
@@ -55,31 +57,32 @@ function boot() {
 }
 
 function onReady() {
-  const who = $('whoami');
-  if (who) {
-    who.textContent = me.userName
-      ? `Playing as ${me.userName}`
-      : (me.embedded ? '' : 'Guest');
-  }
-  wirePlay();
+  if (started) return;
+  started = true;
+  armFirstGesture();
+  $('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
+  connectAndPlay();
 }
 
-// -------------------------------------------------------------- start overlay --
+// ------------------------------------------------------------- first gesture --
 let wakeLock = null;
 async function acquireWakeLock() {
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* optional */ }
 }
 
-function wirePlay() {
-  const playBtn = $('play');
-  if (!playBtn || playBtn.__wired) return;
-  playBtn.__wired = true;
+// There is no PLAY button any more — the game starts on load. But iOS 13+ only
+// hands out motion access (and fullscreen, and a wake lock) from inside a user
+// gesture, so those are deferred to the player's FIRST touch instead of a
+// dedicated tap-to-start screen. Until then the joystick fallback drives, so
+// the game is playable from frame one either way.
+function armFirstGesture() {
+  let done = false;
+  const fire = async () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener('pointerdown', fire, true);
+    window.removeEventListener('click', fire, true);
 
-  playBtn.addEventListener('click', async () => {
-    if (started) return; // double-tap would spawn a second session
-    started = true;
-
-    // Motion permission MUST be requested inside this tap gesture (iOS 13+).
     const tilt = await input.requestTilt();
     if (tilt === 'granted') {
       $('calibrate').style.display = 'block';
@@ -88,15 +91,12 @@ function wirePlay() {
       toast('Motion access denied — using touch joystick');
     }
 
-    // Cosmetic, best-effort — never block entering the game on these.
+    // Cosmetic, best-effort — never block play on these.
     try { document.documentElement.requestFullscreen?.().catch(() => {}); } catch { /* iOS/iframe: no fullscreen */ }
     acquireWakeLock();
-
-    $('start').style.display = 'none';
-    connectAndPlay();
-  });
-
-  $('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
+  };
+  window.addEventListener('pointerdown', fire, true);
+  window.addEventListener('click', fire, true);
 }
 
 // wake locks release when the page hides — take it back on return
@@ -150,7 +150,6 @@ function onRoomAssigned(roomId) {
   if (!roomId || netStarted) return;
   me.roomId = roomId;
   stopSoloPractice();
-  $('start').style.display = 'none';
   toast('Match starting…', 1600);
   startNet(() => platformUrl(roomId));
 }
@@ -266,7 +265,6 @@ let soloRAF = 0;
 function startSoloPractice() {
   if (soloActive || netStarted) return;
   soloActive = true;
-  $('start').style.display = 'none';
   $('scores').innerHTML = '';
   $('status').innerHTML = '<span>practice</span>';
 

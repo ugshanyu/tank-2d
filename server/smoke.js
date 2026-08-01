@@ -114,22 +114,29 @@ async function main() {
     await A.drive(Math.round(1.2 / DT), 1, 0); // ~1.2 s driving right (tick-rate agnostic)
     await sleep(120);
     const a1 = A.me();
-    check(a1.x - a0.x > 200, `A moved right by ${Math.round(a1.x - a0.x)}px (>200)`);
+    check(a1.x - a0.x > 100, `A moved right by ${Math.round(a1.x - a0.x)}px (>100)`);
     check(Math.abs(a1.y - a0.y) < 2, 'A did not drift vertically');
     const ackGap = (A.seq - A.snap.lastAckSeq + 65536) % 65536;
     check(ackGap <= 3, `input ack tracks seq (gap ${ackGap})`);
 
-    // ---- position for a clear horizontal shot along y≈180 ----
-    // A: continue right until x≈1400; B: drive up right lane until y≈180
-    while ((A.me().x) < 1400) await A.drive(10, 1, 0);
+    // ---- position for a clear VERTICAL shot down the left lane (x≈200) ----
+    // The portrait arena's centre line is blocked by the cross-bars and centre
+    // block, but the lane between the wall nubs (x 160..240) is clear top to
+    // bottom. A spawns at (360,90) and B at (360,1190); both slide into the lane,
+    // then close to ~480px — well inside the shell's 2.2 s range.
+    while ((A.me().x) > 205) await A.drive(10, -1, 0);
     await A.drive(12, 0, 0); // brake
-    while ((B.me().y) > 190) await B.drive(10, 0, -1);
+    while ((A.me().y) < 400) await A.drive(10, 0, 1);
+    await A.drive(12, 0, 0);
+    while ((B.me().x) > 205) await B.drive(10, -1, 0);
+    await B.drive(12, 0, 0);
+    while ((B.me().y) > 880) await B.drive(10, 0, -1);
     await B.drive(12, 0, 0);
     await sleep(150);
     const aPos = A.me(), bPos = B.me();
     console.log(`  A at (${Math.round(aPos.x)},${Math.round(aPos.y)}) B at (${Math.round(bPos.x)},${Math.round(bPos.y)})`);
     const dist = Math.hypot(bPos.x - aPos.x, bPos.y - aPos.y);
-    check(dist < 950, `A and B within bullet range (${Math.round(dist)}px)`);
+    check(dist < 700, `A and B within bullet range (${Math.round(dist)}px)`);
 
     // ---- fire until B dies (3 hits needed) ----
     const aim = Math.atan2(bPos.y - aPos.y, bPos.x - aPos.x);

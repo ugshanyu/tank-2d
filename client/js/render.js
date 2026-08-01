@@ -1,5 +1,6 @@
-// Canvas renderer: procedural vector art (no image assets), DPR-aware,
-// camera follows the predicted local tank. World-space drawing only —
+// Canvas renderer: procedural vector art (no image assets), DPR-aware.
+// The camera is FIXED at the arena centre and zoomed to fit the whole map on
+// one screen — nothing scrolls, only the tanks move. World-space drawing only —
 // HUD lives in the DOM (index.html).
 
 import { ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP } from '../shared/protocol.js';
@@ -27,7 +28,12 @@ export class Renderer {
     this.canvas.style.width = this.vw + 'px';
     this.canvas.style.height = this.vh + 'px';
     this.dpr = dpr;
-    this.cam.zoom = clamp(Math.min(this.vw / 1050, this.vh / 750), 0.42, 1.3);
+    // Fit the ENTIRE arena on screen: the camera is fixed at the arena center
+    // and never follows, so the whole map is one static screen and only the
+    // tanks move. Letterboxing on aspect mismatch is intentional.
+    this.cam.zoom = Math.min(this.vw / ARENA_W, this.vh / ARENA_H);
+    this.cam.x = ARENA_W / 2;
+    this.cam.y = ARENA_H / 2;
   }
 
   screenToWorld(sx, sy) {
@@ -42,16 +48,8 @@ export class Renderer {
     const { ctx, cam } = this;
     const now = performance.now();
 
-    if (state.mePos) {
-      // smooth camera follow
-      cam.x += (state.mePos.x - cam.x) * 0.14;
-      cam.y += (state.mePos.y - cam.y) * 0.14;
-    }
-    const halfW = this.vw / 2 / cam.zoom;
-    const halfH = this.vh / 2 / cam.zoom;
-    cam.x = clamp(cam.x, Math.min(halfW, ARENA_W / 2), Math.max(ARENA_W - halfW, ARENA_W / 2));
-    cam.y = clamp(cam.y, Math.min(halfH, ARENA_H / 2), Math.max(ARENA_H - halfH, ARENA_H / 2));
-
+    // No camera follow and no clamping: cam stays pinned to the arena center by
+    // resize(), so the map is motionless and only the tanks move across it.
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = '#0b0e14';
     ctx.fillRect(0, 0, this.vw, this.vh);
@@ -65,8 +63,8 @@ export class Renderer {
     ctx.strokeStyle = 'rgba(120,160,220,0.07)';
     ctx.lineWidth = 1 / cam.zoom;
     ctx.beginPath();
-    for (let x = 0; x <= ARENA_W; x += 120) { ctx.moveTo(x, 0); ctx.lineTo(x, ARENA_H); }
-    for (let y = 0; y <= ARENA_H; y += 120) { ctx.moveTo(0, y); ctx.lineTo(ARENA_W, y); }
+    for (let x = 0; x <= ARENA_W; x += 80) { ctx.moveTo(x, 0); ctx.lineTo(x, ARENA_H); }
+    for (let y = 0; y <= ARENA_H; y += 80) { ctx.moveTo(0, y); ctx.lineTo(ARENA_W, y); }
     ctx.stroke();
 
     // border
@@ -105,7 +103,8 @@ export class Renderer {
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
       ctx.fillStyle = '#ffe796';
-      ctx.beginPath(); ctx.arc(b.x, b.y, BULLET_RADIUS, 0, Math.PI * 2); ctx.fill();
+      // never let a shell shrink below ~4 screen px at the fit-to-arena zoom
+      ctx.beginPath(); ctx.arc(b.x, b.y, Math.max(BULLET_RADIUS, 4 / cam.zoom), 0, Math.PI * 2); ctx.fill();
     }
   }
 
@@ -150,16 +149,24 @@ export class Renderer {
       ctx.setLineDash([]);
     }
 
-    // name + hp
+    // name + hp — drawn at constant SCREEN size. The fit-to-arena zoom is ~0.54
+    // on a phone, which would render a 13px world label at 7px and make it
+    // unreadable; undoing the camera scale keeps labels crisp at any zoom.
+    const k = 1 / this.cam.zoom;
+    ctx.save();
+    ctx.scale(k, k);
+    const top = -(R + 4) / k;          // tank's top edge, expressed in screen-space units
     ctx.font = '600 13px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = isMe ? '#ffffff' : 'rgba(255,255,255,0.75)';
-    ctx.fillText(name || '', 0, -R - 16);
-    const w = 46, h = 5;
+    ctx.fillText(name || '', 0, top - 10);
+    const w = 40, h = 4;
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(-w / 2, -R - 12, w, h);
+    ctx.fillRect(-w / 2, top - 7, w, h);
     ctx.fillStyle = hp > 55 ? '#7ed37e' : hp > 25 ? '#ffcf5e' : '#ff6b5e';
-    ctx.fillRect(-w / 2, -R - 12, w * (hp / MAX_HP), h);
+    ctx.fillRect(-w / 2, top - 7, w * (hp / MAX_HP), h);
+    ctx.restore();
+
     ctx.restore();
   }
 

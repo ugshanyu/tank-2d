@@ -8,27 +8,32 @@ import {
   BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, wrapAngle,
 } from './protocol.js';
 
-// ---- Map: axis-aligned obstacle rects, mirrored layout ----
+// ---- Map: axis-aligned obstacle rects ----
+// Layout for the 720x1280 single-screen arena, mirrored about BOTH axes so no
+// spawn corner has an advantage. Every corridor is >= 70px so a 52px-wide tank
+// always fits with clearance; the side lanes at x~200 and x~520 run the full
+// height unobstructed, which keeps long-range duels possible on a small map.
 export const OBSTACLES = [
-  // center cross
-  { x: 1100, y: 700, w: 200, h: 200 },
-  // four corner bunkers
-  { x: 360, y: 280, w: 260, h: 70 },
-  { x: 1780, y: 280, w: 260, h: 70 },
-  { x: 360, y: 1250, w: 260, h: 70 },
-  { x: 1780, y: 1250, w: 260, h: 70 },
-  // mid-lane walls
-  { x: 700, y: 620, w: 70, h: 360 },
-  { x: 1630, y: 620, w: 70, h: 360 },
-  { x: 1010, y: 260, w: 380, h: 60 },
-  { x: 1010, y: 1280, w: 380, h: 60 },
+  // center block
+  { x: 300, y: 600, w: 120, h: 80 },
+  // horizontal cross-bars above and below center
+  { x: 240, y: 380, w: 240, h: 44 },
+  { x: 240, y: 856, w: 240, h: 44 },
+  // vertical side walls (four corners)
+  { x: 70, y: 200, w: 40, h: 170 },
+  { x: 610, y: 200, w: 40, h: 170 },
+  { x: 70, y: 910, w: 40, h: 170 },
+  { x: 610, y: 910, w: 40, h: 170 },
+  // mid-height nubs jutting in from the left/right walls
+  { x: 40, y: 618, w: 120, h: 44 },
+  { x: 560, y: 618, w: 120, h: 44 },
 ];
 
 export const SPAWN_POINTS = [
-  { x: 180, y: 180 }, { x: ARENA_W - 180, y: 180 },
-  { x: 180, y: ARENA_H - 180 }, { x: ARENA_W - 180, y: ARENA_H - 180 },
-  { x: ARENA_W / 2, y: 140 }, { x: ARENA_W / 2, y: ARENA_H - 140 },
-  { x: 160, y: ARENA_H / 2 }, { x: ARENA_W - 160, y: ARENA_H / 2 },
+  { x: 360, y: 90 }, { x: 360, y: ARENA_H - 90 },
+  { x: 170, y: 250 }, { x: 550, y: 250 },
+  { x: 170, y: 1030 }, { x: 550, y: 1030 },
+  { x: 170, y: 500 }, { x: 550, y: 780 },
 ];
 
 // Push a circle out of an AABB along the axis of least penetration.

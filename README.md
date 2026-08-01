@@ -5,8 +5,14 @@ Up to 8 players per room, instant respawns, bouncing shells. Ships as a **Usion
 direct-mode game** — identity, rooms, and invites come from the platform; the
 client talks binary WebSocket straight to this authoritative server (zero relay hop).
 
-- **Play**: launch from the Usion app (a game invite in chat, or Explore). Tap PLAY
-  (grants motion access on iOS), then tilt to drive and touch to shoot. A solo
+The arena is a single **720x1280 portrait screen**. The whole map is visible at
+all times — the camera never moves, only the tanks do, so there is no scrolling
+and no off-screen threat.
+
+- **Play**: launch from the Usion app (a game invite in chat, or Explore). The game
+  starts immediately — no tap-to-start screen. Tilt to drive and touch to shoot;
+  the first touch is what grants motion access on iOS (the OS only hands it out
+  from a user gesture), and the joystick fallback drives until then. A solo
   Explore launch drops you into a local practice arena until you invite friends
   (host **Share** button) — then it promotes into a live match.
 - **Fallbacks**: no tilt sensor → virtual joystick (left half of screen); desktop → WASD/arrows + mouse.
