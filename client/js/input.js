@@ -11,6 +11,9 @@ export class Input {
     this.canvas = canvas;
     this.joyMax = JOY_MAX;
     this.mode = 'stick';               // 'tilt' | 'stick' (stick also covers kbd)
+    this.prefersTilt = false;          // remembered choice; stick is the default
+    this.suppressNextPointer = false;  // the permission-granting tap is not a shot
+    try { this.prefersTilt = localStorage.getItem('tank.tilt') === '1'; } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
     this.firing = false;
@@ -52,9 +55,14 @@ export class Input {
         if (e.beta === null || e.gamma === null) return; // desktop fires empty events
         settled = true;
         this.tiltReady = true;
-        this.mode = 'tilt';
+        // Do NOT force mode='tilt' here. Granting motion used to lock the player
+        // into tilt steering forever with no code path back — miserable on a bus
+        // or lying down, and it silently killed a joystick drag already in
+        // progress. Tilt is now opt-in and remembered.
+        if (this.prefersTilt) this.setMode('tilt');
         this._beta = e.beta; this._gamma = e.gamma;
         this.calibrate();
+        window.removeEventListener('deviceorientation', onFirst);
         resolve('granted');
       };
       window.addEventListener('deviceorientation', onFirst);
@@ -64,6 +72,27 @@ export class Input {
       });
       setTimeout(() => { if (!settled) { settled = true; resolve('unavailable'); } }, 1200);
     });
+  }
+
+  // Switching control scheme mid-match must cancel any stick the thumb is holding,
+  // otherwise the tank keeps driving in the last joystick direction forever.
+  setMode(mode) {
+    if (mode === 'tilt' && !this.tiltReady) return false;
+    this.mode = mode;
+    this.prefersTilt = mode === 'tilt';
+    this.joy = null;
+    this.moveX = 0; this.moveY = 0;
+    try { localStorage.setItem('tank.tilt', this.prefersTilt ? '1' : '0'); } catch { /* ignore */ }
+    if (mode === 'tilt') this.calibrate();
+    return true;
+  }
+
+  clearTouches() {
+    this._firePointers.clear();
+    this.joy = null;
+    this._mouseDown = false;
+    this.hasAim = false;
+    this.firing = false;
   }
 
   calibrate() {
@@ -123,6 +152,10 @@ export class Input {
     c.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       try { window.focus(); c.focus({ preventScroll: true }); } catch { /* ignore */ }
+      // The very first tap is the one that opens the iOS motion-permission modal.
+      // It used to ALSO register as fire, so the player's first interaction was an
+      // unintended shot — and if the modal swallowed the pointerup, a stuck one.
+      if (this.suppressNextPointer) { this.suppressNextPointer = false; return; }
       try { c.setPointerCapture(e.pointerId); } catch { /* pointer already gone (or synthetic) */ }
       const useStickZone = this.mode !== 'tilt';
       if (useStickZone && e.pointerType !== 'mouse' && !this.joy && e.clientX < window.innerWidth * 0.45) {
@@ -161,6 +194,10 @@ export class Input {
       if (this.joy && e.pointerId === this.joy.pointerId) { this.joy = null; return; }
       if (e.pointerType === 'mouse') this._mouseDown = false;
       this._firePointers.delete(e.pointerId);
+      // hasAim was set true on first touch and never cleared, so after driving
+      // across the arena the turret stayed locked at a stale SCREEN point with no
+      // visible reason. Hold the last angle instead of a last coordinate.
+      if (this._firePointers.size === 0 && e.pointerType !== 'mouse') this.hasAim = false;
     };
     c.addEventListener('pointerup', release);
     c.addEventListener('pointercancel', release);

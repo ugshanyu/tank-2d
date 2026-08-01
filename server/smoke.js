@@ -6,8 +6,8 @@
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import {
-  MSG, DT, encodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
-  TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
+  MSG, DT, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
+  TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS,
 } from '../client/shared/protocol.js';
 
 const PORT = 8123;       // deterministic scripted match — bots disabled
@@ -119,7 +119,22 @@ async function goTo(bot, tx, ty, maxTicks = 900) {
   return ticks < maxTicks;
 }
 
+// The lag-compensation field rides in the input packet's last byte and is self
+// reported, so the clamp is a security boundary, not a nicety.
+function checkProtocol() {
+  const rt = (lag) => {
+    const buf = encodeInput(1, 0, 0, false, 0, 0, lag);
+    return decodeInput(new DataView(buf)).lagTicks;
+  };
+  check(rt(0) === 0, 'lagTicks round-trips 0');
+  check(rt(9) === 9, 'lagTicks round-trips 9');
+  check(rt(MAX_LAG_TICKS) === MAX_LAG_TICKS, `lagTicks round-trips ${MAX_LAG_TICKS}`);
+  check(rt(9999) === MAX_LAG_TICKS, 'oversized lagTicks clamped (rewind exploit bounded)');
+  check(rt(-5) === 0, 'negative lagTicks clamped');
+}
+
 async function main() {
+  checkProtocol();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
   const srv = await startServer(PORT, { BOTS: '0' });

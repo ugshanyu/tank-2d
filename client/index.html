@@ -8,6 +8,14 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0b0e14">
 <style>
+  /* env(safe-area-inset-*) resolves to 0 in a nested browsing context, and this
+     game ships inside the host app's iframe — so the HUD landed under the Dynamic
+     Island on every notched iPhone. Fall back to a real inset when we detect we
+     are framed; main.js overrides these if the host reports true values. */
+  :root { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px);
+          --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px); }
+  :root.framed { --sat: 48px; --sab: 26px; }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; background: #0b0e14; color: #e8eef7;
     font-family: system-ui, -apple-system, sans-serif; overscroll-behavior: none;
@@ -16,18 +24,18 @@
 
   /* HUD */
   #hud { position: fixed; inset: 0; pointer-events: none;
-    padding: calc(env(safe-area-inset-top) + 10px) calc(env(safe-area-inset-right) + 12px)
-             calc(env(safe-area-inset-bottom) + 10px) calc(env(safe-area-inset-left) + 12px); }
+    padding: calc(var(--sat) + 10px) calc(var(--sar) + 12px)
+             calc(var(--sab) + 10px) calc(var(--sal) + 12px); }
   #scores { position: absolute; top: inherit; left: inherit; font-size: 13px; line-height: 1.5;
     background: rgba(6,10,18,0.55); border-radius: 10px; padding: 8px 12px; min-width: 110px;
-    top: calc(env(safe-area-inset-top) + 10px); left: calc(env(safe-area-inset-left) + 12px); }
+    top: calc(var(--sat) + 10px); left: calc(var(--sal) + 12px); }
   #scores .me { color: #8be9fd; font-weight: 700; }
-  #status { position: absolute; top: calc(env(safe-area-inset-top) + 10px);
-    right: calc(env(safe-area-inset-right) + 12px); text-align: right; font-size: 12px;
+  #status { position: absolute; top: calc(var(--sat) + 10px);
+    right: calc(var(--sar) + 12px); text-align: right; font-size: 12px;
     color: #9fb4d0; background: rgba(6,10,18,0.55); border-radius: 10px; padding: 8px 12px; }
   #status .bad { color: #ff8a80; }
-  #calibrate { position: absolute; bottom: calc(env(safe-area-inset-bottom) + 14px);
-    left: calc(env(safe-area-inset-left) + 14px); pointer-events: auto; display: none;
+  #calibrate { position: absolute; bottom: calc(var(--sab) + 14px);
+    left: calc(var(--sal) + 14px); pointer-events: auto; display: none;
     background: rgba(20,30,48,0.8); color: #cfe3ff; border: 1px solid #33507a;
     border-radius: 12px; padding: 10px 16px; font-size: 14px; }
   #toast { position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
@@ -68,6 +76,59 @@
   #match .who { font-size: 40px; font-weight: 900; letter-spacing: 6px; }
   #match .sub { font-size: 15px; color: #9fb4d0; }
   #match .tally { font-size: 13px; color: #64769a; letter-spacing: 1px; }
+
+  /* 44x44pt minimum tap targets, per the iOS HIG */
+  .icon-btn { position: absolute; width: 44px; height: 44px; display: flex;
+    align-items: center; justify-content: center; pointer-events: auto;
+    background: rgba(6,10,18,0.55); border: none; border-radius: 12px;
+    color: #cfe3ff; font-size: 19px; cursor: pointer; }
+  .icon-btn:active { transform: scale(.94); }
+  #gear { top: calc(var(--sat) + 58px); right: calc(var(--sar) + 12px); }
+
+  /* settings sheet */
+  #sheet { position: fixed; inset: 0; z-index: 8; display: flex; align-items: flex-end;
+    justify-content: center; background: rgba(4,7,12,.6); opacity: 0; visibility: hidden;
+    transition: opacity .2s ease-out, visibility 0s .2s; }
+  #sheet.on { opacity: 1; visibility: visible; transition-delay: 0s; }
+  #sheet .card { width: 100%; max-width: 460px; background: #141a26; border-radius: 18px 18px 0 0;
+    padding: 18px 18px calc(var(--sab) + 22px); transform: translateY(100%);
+    transition: transform .26s cubic-bezier(.16,1,.3,1); }
+  #sheet.on .card { transform: translateY(0); }
+  #sheet h2 { font-size: 15px; letter-spacing: 2px; color: #8be9fd; margin-bottom: 14px; }
+  #sheet .row { display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; border-top: 1px solid #222b3c; font-size: 15px; }
+  #sheet .seg { display: flex; gap: 6px; }
+  #sheet .seg button, #sheet .row > button { min-height: 36px; padding: 0 14px; border-radius: 9px;
+    border: 1px solid #33405c; background: transparent; color: #cfe3ff; font-size: 14px; cursor: pointer; }
+  #sheet .seg button.sel { background: #1f8fd6; border-color: #1f8fd6; color: #06131f; font-weight: 700; }
+  #sheet .seg button:disabled { opacity: .35; }
+  #sheet .close { width: 100%; margin-top: 16px; min-height: 46px; border-radius: 12px;
+    border: none; background: #1f8fd6; color: #06131f; font-weight: 800; font-size: 16px;
+    letter-spacing: 1px; cursor: pointer; }
+
+  /* first-run how-to-play */
+  #intro { position: fixed; inset: 0; z-index: 9; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; text-align: center;
+    padding: 30px; background: rgba(6,10,18,.86); backdrop-filter: blur(3px);
+    opacity: 0; visibility: hidden; transition: opacity .25s ease-out, visibility 0s .25s; }
+  #intro.on { opacity: 1; visibility: visible; transition-delay: 0s; }
+  #intro h1 { font-size: 34px; letter-spacing: 8px; color: #8be9fd; }
+  #intro .steps { display: flex; flex-direction: column; gap: 14px; max-width: 300px; }
+  #intro .step { display: flex; gap: 12px; align-items: center; text-align: left; font-size: 14px;
+    color: #cfe3ff; line-height: 1.4; }
+  #intro .step b { display: flex; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 9px;
+    background: #1c2740; color: #8be9fd; align-items: center; justify-content: center; font-size: 15px; }
+  #intro .go { min-height: 50px; padding: 0 46px; border-radius: 13px; border: none;
+    background: linear-gradient(180deg, #35c3ef, #1f8fd6); color: #06131f;
+    font-size: 17px; font-weight: 800; letter-spacing: 3px; cursor: pointer; }
+
+  /* connection loss must be legible as frozen, not mistaken for lag */
+  #offline { position: fixed; inset: 0; z-index: 7; display: flex; align-items: center;
+    justify-content: center; flex-direction: column; gap: 10px; pointer-events: none;
+    background: rgba(6,10,18,.62); font-size: 17px; letter-spacing: 2px; color: #ff8a80;
+    opacity: 0; visibility: hidden; transition: opacity .2s, visibility 0s .2s; }
+  #offline.on { opacity: 1; visibility: visible; transition-delay: 0s; }
+  #offline small { font-size: 13px; letter-spacing: 0; color: #9fb4d0; }
 </style>
 </head>
 <body>
@@ -79,6 +140,36 @@
   <div id="respawn"><span>DESTROYED</span><small id="respawnIn"></small></div>
   <div id="toast"></div>
   <button id="calibrate">⟳ level tilt</button>
+  <button id="gear" class="icon-btn" aria-label="Settings">⚙</button>
+</div>
+
+<div id="offline"><span>RECONNECTING</span><small id="offlineSub"></small></div>
+
+<div id="sheet">
+  <div class="card">
+    <h2>SETTINGS</h2>
+    <div class="row"><span>Steering</span>
+      <span class="seg">
+        <button id="optStick">Joystick</button>
+        <button id="optTilt">Tilt</button>
+      </span>
+    </div>
+    <div class="row"><span>Sound</span><button id="optSound">On</button></div>
+    <div class="row"><span>Vibration</span><button id="optHaptics">On</button></div>
+    <div class="row"><span>Re-centre tilt</span><button id="optCal">Level now</button></div>
+    <div class="row"><span>How to play</span><button id="optHelp">Show</button></div>
+    <button class="close" id="sheetClose">DONE</button>
+  </div>
+</div>
+
+<div id="intro">
+  <h1>TANK</h1>
+  <div class="steps">
+    <div class="step"><b>1</b><span id="introDrive">Drag the left side to drive.</span></div>
+    <div class="step"><b>2</b><span>Touch the right side to aim and shoot.</span></div>
+    <div class="step"><b>3</b><span>Destroy the enemy tower to win. It shoots back.</span></div>
+  </div>
+  <button class="go" id="introGo">PLAY</button>
 </div>
 
 <div id="hurt"></div>

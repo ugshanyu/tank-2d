@@ -14,7 +14,7 @@ import {
   BULLET_DAMAGE, FIRE_COOLDOWN, OWNER_GRACE, MUZZLE_OFFSET, RESPAWN_DELAY,
   MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
-  decodeInput, encodeSnapshot, encodePong,
+  MAX_LAG_TICKS, decodeInput, encodeSnapshot, encodePong,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
@@ -27,6 +27,8 @@ const INPUT_QUEUE_CAP = 6;      // jitter buffer cap; beyond this old inputs are
 const INPUTS_PER_TICK = 2;      // catch-up bound (limits burst speed-up)
 const IDLE_TIMEOUT_MS = 15000;  // kick silent connections (clients ping every 2 s)
 const HELLO_TIMEOUT_MS = 5000;
+const HIST_TICKS = 32;          // position history ring for lag compensation
+                                // (> MAX_LAG_TICKS so a rewind never wraps onto itself)
 
 // ---------- rooms ----------
 const rooms = new Map(); // roomId -> Room
@@ -82,6 +84,7 @@ function addBot(room) {
     tank: makeTank(id, s.x, s.y, team),
     inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
     nextFireAt: -10, respawnAt: 0,
+    hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
     ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1 },
   };
   room.players.set(id, bot);
@@ -181,18 +184,36 @@ function stepRoom(room) {
     p.tank.turret = p.turret;
   }
 
+  // 1b. record every tank's position for this tick, so shots can be tested
+  // against where a target actually was on the shooter's screen
+  for (const p of room.players.values()) {
+    const i = (tick % HIST_TICKS) * 2;
+    p.hist[i] = p.tank.x;
+    p.hist[i + 1] = p.tank.y;
+    if (!p.histFilled && (p.histCount = (p.histCount || 0) + 1) >= HIST_TICKS) p.histFilled = true;
+  }
+
   // 2. bullets — swept hit test (pre-step → post-step segment vs tank circle),
   // so point-blank shots and fast bullets can't skip over a target between ticks
   const survivors = [];
   for (const b of room.bullets) {
     const px = b.x, py = b.y;
     const alive = stepBullet(b, DT);
+    // LAG COMPENSATION. The shooter aimed at what their screen showed, which is
+    // `b.lag` ticks behind the server. Evaluating the shell against present-day
+    // positions meant a shot centred on the sprite missed outright — at 205 px/s
+    // and 150 ms of view lag the target has moved ~31 px, more than a tank radius.
+    // The whole projectile lives in the shooter's timeline, so we test it against
+    // history[tick - lag] for its entire flight, which stays self-consistent.
     let hit = null;
+    const hi = b.lag > 0 ? (((tick - b.lag) % HIST_TICKS) + HIST_TICKS) % HIST_TICKS * 2 : -1;
     for (const p of room.players.values()) {
       const t = p.tank;
       if (!t.alive) continue;
       if (p.id === b.owner && b.age < OWNER_GRACE) continue;
-      if (segCircleDist(px, py, b.x, b.y, t.x, t.y) < TANK_RADIUS + BULLET_RADIUS) { hit = p; break; }
+      let tx = t.x, ty = t.y;
+      if (hi >= 0 && p.histFilled) { tx = p.hist[hi]; ty = p.hist[hi + 1]; }
+      if (segCircleDist(px, py, b.x, b.y, tx, ty) < TANK_RADIUS + BULLET_RADIUS) { hit = p; break; }
     }
     // A shell that reached a tower is already dead (shared sim detonates it);
     // the authoritative swept test decides whether it counts as tower damage.
@@ -222,6 +243,7 @@ function stepRoom(room) {
       const t = p.tank;
       t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true;
       p.respawnAt = 0;
+      resetHistory(p, s.x, s.y);
       p.inputQueue.length = 0; // stale pre-death inputs must not move the fresh tank
       room.broadcastJson({ t: 'spawn', id: p.id, x: s.x, y: s.y });
     }
@@ -272,6 +294,7 @@ function stepTowers(room) {
       id: room.nextBulletId++, owner: TOWER_OWNER_BASE + i, x, y,
       vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
       age: 0, bounces: 0,
+      lag: 0,   // the tower shoots in the server's own present; nothing to rewind
     };
     room.bullets.push(b);
     room.broadcastJson({
@@ -280,6 +303,14 @@ function stepTowers(room) {
       a: Math.round(a * 1000) / 1000, tick,
     });
   }
+}
+
+// A respawn teleports the tank, so the position ring still holds where it died.
+// Flood it with the spawn point or a rewound shot could hit a ghost at the corpse.
+function resetHistory(p, x, y) {
+  for (let i = 0; i < HIST_TICKS; i++) { p.hist[i * 2] = x; p.hist[i * 2 + 1] = y; }
+  p.histFilled = true;
+  p.histCount = HIST_TICKS;
 }
 
 function damageTower(room, idx) {
@@ -312,6 +343,7 @@ function startMatch(room) {
     const t = p.tank;
     t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.score = 0;
     p.respawnAt = 0; p.nextFireAt = -10;
+    resetHistory(p, s.x, s.y);
     p.inputQueue.length = 0;
   }
   room.broadcastJson({ t: 'matchstart', wins: room.wins });
@@ -331,6 +363,7 @@ function tryFire(room, p, inp) {
     id: room.nextBulletId++, owner: p.id, x, y,
     vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
     age: 0, bounces: 0,
+    lag: Math.max(0, Math.min(MAX_LAG_TICKS, inp.lagTicks | 0)),
   };
   room.bullets.push(b);
   room.broadcastJson({
@@ -498,6 +531,7 @@ wss.on('connection', (ws, req) => {
           tank: makeTank(id, s.x, s.y, team),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
           nextFireAt: -10, respawnAt: 0,
+          hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
         };
         room.players.set(id, player);
         ws.send(JSON.stringify({

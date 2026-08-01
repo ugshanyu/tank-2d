@@ -2,7 +2,9 @@
 // JSON for events. Auto-reconnects with backoff. Estimates server time from
 // snapshot ticks (EMA) so interpolation has a stable clock without pong math.
 
-import { MSG, DT, decodeSnapshot, decodePong, encodeInput, encodePing } from '../shared/protocol.js';
+import {
+  MSG, DT, INTERP_DELAY_MS, decodeSnapshot, decodePong, encodeInput, encodePing,
+} from '../shared/protocol.js';
 
 export class Net {
   // `resolveUrl` is an async () => wsUrl-with-token, called on every (re)connect
@@ -164,10 +166,17 @@ export class Net {
     return performance.now() + this.clockOffset;
   }
 
-  sendInput(seq, moveX, moveY, firing, aim, fireNonce) {
+  sendInput(seq, moveX, moveY, firing, aim, fireNonce, lagTicks) {
     if (this.ws && this.ws.readyState === 1 && this.connected) {
-      this.ws.send(encodeInput(seq, moveX, moveY, firing, aim, fireNonce));
+      this.ws.send(encodeInput(seq, moveX, moveY, firing, aim, fireNonce, lagTicks));
     }
+  }
+
+  // How far behind the server our rendered view is, in ticks: the interpolation
+  // delay plus one-way latency. This is what the server rewinds to when it tests
+  // our shots, so what we shoot at is what we saw.
+  viewLagTicks() {
+    return Math.round((INTERP_DELAY_MS + this.rtt / 2) / (DT * 1000));
   }
 
   close() {

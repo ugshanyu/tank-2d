@@ -106,7 +106,10 @@ export class Game {
     // position matches the authoritative one exactly
     if (aliveNow) stepTank(this.me, inp, DT);
     if (firing) this._spawnPredicted(nonce, aim);
-    this.net.sendInput(inp.seq, inp.moveX, inp.moveY, inp.firing, inp.aim, inp.fireNonce);
+    this.net.sendInput(
+      inp.seq, inp.moveX, inp.moveY, inp.firing, inp.aim, inp.fireNonce,
+      this.net.viewLagTicks(),
+    );
 
     // advance my predicted bullets on the same fixed timeline
     for (const [nonceKey, b] of this.predicted) {

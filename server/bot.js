@@ -58,26 +58,42 @@ function blockedForTank(x, y) {
   return false;
 }
 
-// Would a shell get through? skipTower is the tower we're deliberately shooting.
-function shotBlocked(x, y, skipTower) {
-  for (const r of OBSTACLES) {
-    if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) return true;
+// Analytic segment-vs-AABB (slab method). The old version sampled the segment
+// every 16px — ~876 geometric tests per bot per tick, ~200k/s per room, enough to
+// push the 60 Hz tick loop past its deadline. This is O(1) per rect and strictly
+// more accurate: 16px sampling could tunnel clean through a 40px wall at an
+// oblique angle, so bots occasionally "saw" through walls and shot them instead.
+function segAabb(x1, y1, x2, y2, rx, ry, rw, rh) {
+  const dx = x2 - x1, dy = y2 - y1;
+  let t0 = 0, t1 = 1;
+  for (let axis = 0; axis < 2; axis++) {
+    const p = axis === 0 ? dx : dy;
+    const o = axis === 0 ? x1 : y1;
+    const lo = axis === 0 ? rx : ry;
+    const hi = axis === 0 ? rx + rw : ry + rh;
+    if (Math.abs(p) < 1e-9) { if (o < lo || o > hi) return false; continue; }
+    let a = (lo - o) / p, b = (hi - o) / p;
+    if (a > b) { const t = a; a = b; b = t; }
+    if (a > t0) t0 = a;
+    if (b < t1) t1 = b;
+    if (t0 > t1) return false;
   }
-  for (let i = 0; i < TOWERS.length; i++) {
-    if (i === skipTower) continue;
-    const t = TOWERS[i];
-    const dx = x - t.x, dy = y - t.y;
-    if (dx * dx + dy * dy < TOWER_RADIUS * TOWER_RADIUS) return true;
-  }
-  return false;
+  return true;
+}
+
+function segCircle(x1, y1, x2, y2, cx, cy, r) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2)) : 0;
+  const px = x1 + t * dx - cx, py = y1 + t * dy - cy;
+  return px * px + py * py < r * r;
 }
 
 function losClear(x1, y1, x2, y2, skipTower = -1) {
-  const d = Math.hypot(x2 - x1, y2 - y1);
-  const steps = Math.max(2, Math.ceil(d / 16));
-  for (let i = 1; i < steps; i++) {
-    const f = i / steps;
-    if (shotBlocked(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f, skipTower)) return false;
+  for (const r of OBSTACLES) if (segAabb(x1, y1, x2, y2, r.x, r.y, r.w, r.h)) return false;
+  for (let i = 0; i < TOWERS.length; i++) {
+    if (i === skipTower) continue;
+    if (segCircle(x1, y1, x2, y2, TOWERS[i].x, TOWERS[i].y, TOWER_RADIUS)) return false;
   }
   return true;
 }
@@ -85,11 +101,11 @@ function losClear(x1, y1, x2, y2, skipTower = -1) {
 // Steer toward (tx,ty), fanning out from the direct heading until a probe point
 // is walkable. Cheap, has no map graph to maintain, and the fan is wide enough
 // (out to ±150°) that a tank can back out of the dead ends this map has.
+const STEER_FAN = [0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 1.95, -1.95, 2.6, -2.6];
 function steer(tank, tx, ty, bias) {
   const base = Math.atan2(ty - tank.y, tx - tank.x);
   const probe = TANK_RADIUS + 38;
-  const fan = [0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 1.95, -1.95, 2.6, -2.6];
-  for (const off of fan) {
+  for (const off of STEER_FAN) {
     const a = base + off * (bias || 1);
     if (blockedForTank(tank.x + Math.cos(a) * probe, tank.y + Math.sin(a) * probe)) continue;
     return { x: Math.cos(a), y: Math.sin(a) };

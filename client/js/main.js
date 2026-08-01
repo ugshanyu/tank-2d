@@ -20,10 +20,17 @@ const $ = (id) => document.getElementById(id);
 // Cached once — these were being looked up ~10x per frame.
 const EL = {};
 for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrate',
-                  'match', 'matchWho', 'matchSub', 'matchTally', 'hurt']) {
+                  'match', 'matchWho', 'matchSub', 'matchTally', 'hurt', 'gear',
+                  'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
+                  'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
+                  'offline', 'offlineSub']) {
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
+
+// Safe-area insets are 0 inside a nested browsing context. If we are framed, fall
+// back to values that clear a notch/Dynamic Island and the home indicator.
+if (window.self !== window.top) document.documentElement.classList.add('framed');
 
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
@@ -71,8 +78,10 @@ function onReady() {
   if (started) return;
   started = true;
   armFirstGesture();
-  $('calibrate').addEventListener('click', () => { input.calibrate(); toast('Tilt re-centered'); });
+  wireUi();
+  EL.calibrate.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   connectAndPlay();
+  maybeShowIntro();
 }
 
 // ------------------------------------------------------------- first gesture --
@@ -95,14 +104,15 @@ function armFirstGesture() {
     window.removeEventListener('click', fire, true);
 
     sfx.unlock();   // AudioContext can only start inside a gesture
+    input.suppressNextPointer = true;   // this tap opens a modal; it is not a shot
 
     const tilt = await input.requestTilt();
     if (tilt === 'granted') {
-      $('calibrate').style.display = 'block';
-      toast('Tilt enabled — hold your phone level, then tilt to drive');
-    } else if (tilt === 'denied') {
-      toast('Motion access denied — using touch joystick');
+      EL.calibrate.style.display = input.mode === 'tilt' ? 'block' : 'none';
+      if (input.mode === 'tilt') toast('Tilt enabled — hold your phone level');
     }
+    // The permission modal can swallow pointerup, leaving a phantom held touch.
+    input.clearTouches();
 
     // Cosmetic, best-effort — never block play on these.
     try { document.documentElement.requestFullscreen?.().catch(() => {}); } catch { /* iOS/iframe: no fullscreen */ }
@@ -117,14 +127,84 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && started) acquireWakeLock();
 });
 
-let toastTimer = 0;
+// Queued, not single-slot. The old version cleared and overwrote, so on a solo
+// launch the welcome message plus three bot joins all landed in one tick and the
+// player only ever saw "Bulwark joined RED" — never their team or the objective.
+const toastQ = [];
+let toastBusy = false;
 function toast(text, ms = 2200) {
-  const el = $('toast');
+  toastQ.push({ text, ms });
+  if (toastQ.length > 3) toastQ.splice(0, toastQ.length - 3);
+  pumpToast();
+}
+function pumpToast() {
+  if (toastBusy || !toastQ.length) return;
+  const el = EL.toast;
   if (!el) return;
+  const { text, ms } = toastQ.shift();
+  toastBusy = true;
   el.textContent = text;
   el.style.opacity = 1;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.style.opacity = 0; }, ms);
+  setTimeout(() => {
+    el.style.opacity = 0;
+    setTimeout(() => { toastBusy = false; pumpToast(); }, 240);
+  }, ms);
+}
+
+// ------------------------------------------------------------------ settings --
+function openSheet(open) {
+  EL.sheet.classList.toggle('on', open);
+  syncSheet();
+}
+function syncSheet() {
+  EL.optStick.classList.toggle('sel', input.mode !== 'tilt');
+  EL.optTilt.classList.toggle('sel', input.mode === 'tilt');
+  EL.optTilt.disabled = !input.tiltReady;
+  EL.optSound.textContent = sfx.muted ? 'Off' : 'On';
+  EL.optHaptics.textContent = hapticsOn ? 'On' : 'Off';
+  EL.calibrate.style.display = input.mode === 'tilt' ? 'block' : 'none';
+}
+let hapticsOn = true;
+try { hapticsOn = localStorage.getItem('tank.haptics') !== '0'; } catch { /* private mode */ }
+
+function wireUi() {
+  EL.gear.addEventListener('click', () => openSheet(true));
+  EL.sheetClose.addEventListener('click', () => openSheet(false));
+  EL.sheet.addEventListener('click', (e) => { if (e.target === EL.sheet) openSheet(false); });
+  EL.optStick.addEventListener('click', () => { input.setMode('stick'); syncSheet(); });
+  EL.optTilt.addEventListener('click', async () => {
+    if (!input.tiltReady) await input.requestTilt();
+    input.setMode('tilt');
+    syncSheet();
+  });
+  EL.optSound.addEventListener('click', () => { sfx.unlock(); sfx.setMuted(!sfx.muted); syncSheet(); });
+  EL.optHaptics.addEventListener('click', () => {
+    hapticsOn = !hapticsOn;
+    try { localStorage.setItem('tank.haptics', hapticsOn ? '1' : '0'); } catch { /* ignore */ }
+    syncSheet();
+  });
+  EL.optCal.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
+  EL.optHelp.addEventListener('click', () => { openSheet(false); showIntro(); });
+  EL.introGo.addEventListener('click', () => {
+    EL.intro.classList.remove('on');
+    input.clearTouches();
+    try { localStorage.setItem('tank.seen', '1'); } catch { /* ignore */ }
+  });
+}
+
+// Dropping a first-time player cold into a live match with no explanation was the
+// single most disorienting thing about this game. Shown once, recallable from
+// settings. The match runs underneath — this never blocks or pauses anyone else.
+function showIntro() {
+  EL.introDrive.textContent = input.mode === 'tilt'
+    ? 'Tilt your phone to drive.'
+    : 'Drag the left side to drive.';
+  EL.intro.classList.add('on');
+}
+function maybeShowIntro() {
+  let seen = false;
+  try { seen = localStorage.getItem('tank.seen') === '1'; } catch { /* private mode */ }
+  if (!seen) showIntro();
 }
 
 // ------------------------------------------------------------- mode selection --
@@ -186,9 +266,14 @@ function startNet(resolveUrl) {
       if (m.t === 'error') toast(m.reason, 4000);
     },
     onStatus: (s) => {
-      $('status').innerHTML = s === 'connected'
+      EL.status.innerHTML = s === 'connected'
         ? `<span id="pingv"></span>`
         : `<span class="bad">${s}…</span>`;
+      // A frozen arena that still renders as if live is indistinguishable from lag,
+      // so the player keeps mashing a dead game. Make "frozen" legible.
+      const off = s !== 'connected';
+      EL.offline.classList.toggle('on', off);
+      if (off) EL.offlineSub.textContent = s === 'connecting' ? 'joining the match…' : 'trying to get you back in…';
     },
   });
   game.net = net;
@@ -285,6 +370,7 @@ function startNet(resolveUrl) {
     drawState.dt = dt || 1 / 60;
     drawState.lastFireAt = game.lastFireAt;
     drawState.reload = game.reloadFraction();
+    drawState.showAim = input.hasAim;
     renderer.draw(drawState);
 
     // The HUD does not need 60 Hz. It was rebuilding the scoreboard string, sorting
@@ -307,7 +393,7 @@ function drainFeedback() {
     const e = q[i];
     const pan = e.x !== undefined ? Math.max(-1, Math.min(1, (e.x - 360) / 360)) : 0;
     sfx.play(e.kind, pan);
-    haptic(e.kind);
+    if (hapticsOn) haptic(e.kind);
     if (e.kind === 'hurt') hurtUntil = performance.now() + 260;
   }
   q.length = 0;

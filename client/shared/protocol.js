@@ -89,8 +89,13 @@ export const encAngle8 = (a) => Math.round(((wrapAngle(a) + Math.PI) / (2 * Math
 export const decAngle8 = (v) => (v / 255) * 2 * Math.PI - Math.PI;
 
 // ---- INPUT: c->s, 11 bytes ----
-// [u8 type][u16 seq][i8 moveX][i8 moveY][u8 buttons][i16 aim][u16 fireNonce][u8 pad]
-export function encodeInput(seq, moveX, moveY, firing, aim, fireNonce) {
+// [u8 type][u16 seq][i8 moveX][i8 moveY][u8 buttons][i16 aim][u16 fireNonce][u8 lag]
+// The last byte is the client's own view lag in ticks (interpolation delay plus
+// half its RTT) — what the server rewinds to for hit detection. It is self
+// reported, so the server clamps it to MAX_LAG_TICKS; that bounds any exploit to
+// the same rewind an honest high-ping player would get.
+export const MAX_LAG_TICKS = 24;        // 400 ms of rewind, hard ceiling
+export function encodeInput(seq, moveX, moveY, firing, aim, fireNonce, lagTicks = 0) {
   const buf = new ArrayBuffer(11);
   const v = new DataView(buf);
   v.setUint8(0, MSG.INPUT);
@@ -100,7 +105,7 @@ export function encodeInput(seq, moveX, moveY, firing, aim, fireNonce) {
   v.setUint8(5, firing ? 1 : 0);
   v.setInt16(6, encAngle16(aim), true);
   v.setUint16(8, fireNonce & 0xffff, true);
-  v.setUint8(10, 0);
+  v.setUint8(10, Math.max(0, Math.min(MAX_LAG_TICKS, Math.round(lagTicks))));
   return buf;
 }
 export function decodeInput(v /* DataView */) {
@@ -111,6 +116,7 @@ export function decodeInput(v /* DataView */) {
     firing: (v.getUint8(5) & 1) !== 0,
     aim: decAngle16(v.getInt16(6, true)),
     fireNonce: v.getUint16(8, true),
+    lagTicks: Math.min(MAX_LAG_TICKS, v.getUint8(10)),
   };
 }
 

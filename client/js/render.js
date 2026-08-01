@@ -204,6 +204,24 @@ export class Renderer {
       if (!t.alive) continue;
       this._tank(t.x, t.y, t.hull, t.turret, t.team, t.name, t.hp, false);
     }
+    // Aim ray. Direct-touch aiming means a ~45px fingertip sits on top of a 31px
+    // enemy sprite — you cannot see the thing you are shooting at. The ray shows
+    // the line of fire clear of the thumb without changing the control scheme.
+    if (state.me && state.me.alive !== false && state.mePos && state.showAim) {
+      const a = state.aimAngle;
+      const ox = state.mePos.x + Math.cos(a) * (TANK_RADIUS + 10);
+      const oy = state.mePos.y + Math.sin(a) * (TANK_RADIUS + 10);
+      const grad = ctx.createLinearGradient(ox, oy, ox + Math.cos(a) * 260, oy + Math.sin(a) * 260);
+      grad.addColorStop(0, 'rgba(255,255,255,0.30)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2 / cam.zoom;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.lineTo(ox + Math.cos(a) * 260, oy + Math.sin(a) * 260);
+      ctx.stroke();
+    }
+
     // my tank — with barrel recoil and the reload arc
     if (state.me && state.me.alive !== false && state.mePos) {
       const sinceFire = now - (state.lastFireAt ?? -1e9);
