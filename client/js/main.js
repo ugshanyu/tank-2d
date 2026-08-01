@@ -13,6 +13,7 @@ import { Input } from './input.js';
 import { Game } from './game.js';
 import { Renderer, teamColor, setShakeScale, getShakeScale } from './render.js';
 import { Sfx, haptic } from './audio.js';
+import { awardMatch, load as loadProfile, levelFromXp } from './profile.js';
 import { makeTank, stepTank, stepBullet, TEAM_SPAWNS } from '../shared/sim.js';
 
 const canvas = document.getElementById('game');
@@ -25,7 +26,8 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
-                  'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat']) {
+                  'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
+                  'matchCard', 'stKills', 'stDeaths', 'stTower', 'xpLevel', 'xpGain', 'xpFill']) {
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
@@ -405,6 +407,7 @@ function startNet(resolveUrl) {
     drawState.aimAngle = aimAngle;
     drawState.myTeam = game.myTeam;
     drawState.towerHp = game.towerHp;
+    drawState.towers = game.towerState;
     drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
 
     // Resolve EVERY shell against exactly the tanks being drawn this frame, so an
@@ -475,6 +478,29 @@ function drainFeedback() {
   }
 }
 
+// Post-match scorecard + XP. Awarded exactly once per match, when the result
+// screen first appears — updateHud runs on a timer, so this must be idempotent.
+function showScorecard() {
+  const kills = game.meServer ? game.meServer.score : 0;
+  const deaths = game.matchDeaths;
+  const towerDamage = game.matchTowerDamage;
+  EL.stKills.textContent = kills;
+  EL.stDeaths.textContent = deaths;
+  EL.stTower.textContent = towerDamage;
+
+  const res = awardMatch({ won: game.winner === game.myTeam, kills, deaths, towerDamage });
+  EL.xpLevel.textContent = res.levelledUp ? `LEVEL UP — LV ${res.level}` : `LV ${res.level}`;
+  EL.xpGain.textContent = `+${res.gained} XP`;
+  // start from zero so the bar visibly fills rather than appearing pre-filled
+  EL.xpFill.style.width = '0%';
+  requestAnimationFrame(() => {
+    EL.xpFill.style.width = `${Math.round((res.intoLevel / res.levelSpan) * 100)}%`;
+  });
+  if (res.levelledUp) sfx.play('win');
+  game.matchDeaths = 0;
+  game.matchTowerDamage = 0;
+}
+
 function updateHud() {
   // team scoreboard: tower integrity is the win condition, kills are secondary
   const rows = game.scoreboard();
@@ -520,6 +546,7 @@ function updateHud() {
       EL.matchWho.textContent = game.winner === game.myTeam ? 'VICTORY' : 'DEFEAT';
       EL.matchWho.style.color = teamColor(game.winner);
       EL.matchTally.textContent = `${TEAM_NAMES[0]} ${game.wins[0]} — ${game.wins[1]} ${TEAM_NAMES[1]}`;
+      showScorecard();
     }
   }
   if (over) {

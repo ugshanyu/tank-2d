@@ -25,6 +25,19 @@ and no off-screen threat.
 - Tanks and shells both collide with towers; shells *detonate* on a tower rather
   than bouncing off it, which is how a tower takes damage.
 
+## Progression
+
+Every match ends on a scorecard — kills, deaths, tower damage — and awards XP
+weighted toward the objective (a win and tower damage are worth more than kills,
+because the tower is the win condition and a kills-only scoreboard teaches the
+wrong game). Level, XP and lifetime stats persist in `localStorage`
+(`client/js/profile.js`).
+
+**This is deliberately local-only.** There is no account and no server-side
+column, so progress survives a reload but not a new device or a cleared cache.
+That is the honest minimum retention loop; a real one needs a persisted account
+row, which is a platform decision rather than a game one.
+
 ## Bots
 
 A lone player is topped up to 2v2 with three bots, one of each archetype

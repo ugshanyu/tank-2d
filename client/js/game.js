@@ -12,7 +12,8 @@
 
 import {
   DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
-  RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, wrapAngle, encAngle16, decAngle16,
+  RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, TOWER_OWNER_BASE,
+  wrapAngle, encAngle16, decAngle16,
 } from '../shared/protocol.js';
 import { stepTank, stepBullet } from '../shared/sim.js';
 
@@ -86,6 +87,9 @@ export class Game {
     this.lastHp = MAX_HP;
     this.events = [];             // {kind, x, y} feedback queue for audio/haptics
     this.feed = [];               // kill feed rows — a 2v2 had no readable narrative
+    this.towerState = [{ aim: undefined, firedAt: -1e9 }, { aim: undefined, firedAt: -1e9 }];
+    this.matchDeaths = 0;
+    this.matchTowerDamage = 0;
     this.killBannerAt = -1e9;
     this.killBannerName = '';
   }
@@ -440,6 +444,8 @@ export class Game {
         this.errX = 0; this.errY = 0;
         this._resetMagazine();
         this._predDmg.clear();
+        this.matchDeaths = 0;
+        this.matchTowerDamage = 0;
         for (const id of this.remotes.keys()) {
           this.remotes.get(id).length = 0;  // don't interpolate across the reset
           this._breakSmoothing(id);
@@ -476,6 +482,11 @@ export class Game {
           this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
           this.events.push({ kind: 'fire', key: msg.id, x: msg.x });
         }
+        // Tower shots drive the tower barrel's aim and recoil.
+        if (msg.id >= TOWER_OWNER_BASE) {
+          const t = this.towerState[msg.id - TOWER_OWNER_BASE];
+          if (t) { t.aim = msg.a; t.firedAt = performance.now(); }
+        }
         break;
       }
       case 'bx': {
@@ -496,6 +507,7 @@ export class Game {
         // using msg.x/msg.y made your own shell fly visibly past the impact and the
         // explosion pop back behind it — ~34px of separation at 80ms one-way.
         const local = this.bullets.get(msg.bid);
+        const mine = local ? local.owner === this.myId : false;
         const ex = local ? local.x : msg.x;
         const ey = local ? local.y : msg.y;
         this.bullets.delete(msg.bid);
@@ -504,6 +516,7 @@ export class Game {
           x: ex, y: ey, born: performance.now(), dur: msg.hit ? 450 : 250,
         });
         if (msg.tower >= 0) {
+          if (mine && msg.tower !== this.myTeam) this.matchTowerDamage += BULLET_DAMAGE;
           this.shake = Math.max(this.shake, 5);
           this.events.push({ kind: 'towerhit', key: msg.tower, x: ex });
         } else if (msg.hit) {
@@ -515,6 +528,7 @@ export class Game {
       }
       case 'death':
         if (msg.victim === this.myId) {
+          this.matchDeaths += 1;
           this.respawnCountdown = performance.now() + RESPAWN_DELAY * 1000;
           this.killedBy = this.names.get(msg.killer) || (msg.killer >= 200 ? 'a tower' : '');
         } else if (msg.killer === this.myId) {

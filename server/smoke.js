@@ -208,9 +208,42 @@ async function checkInstantHits() {
   check(g4.events.some((e) => e.kind === 'towerhit'), 'tower damage is never silent after a misprediction');
 }
 
+// Progression is local-only, so its correctness is entirely in this module:
+// a non-monotonic curve or a lossy save is invisible until a player loses a level.
+async function checkProfile() {
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  };
+  const { awardMatch, load, levelFromXp, xpForLevel } = await import('../client/js/profile.js');
+
+  let monotonic = true, invertible = true;
+  let prev = -1;
+  for (let l = 1; l <= 30; l++) {
+    const x = xpForLevel(l);
+    if (x <= prev) monotonic = false;
+    if (levelFromXp(x) !== l) invertible = false;
+    prev = x;
+  }
+  check(monotonic, 'xp curve is strictly increasing (no level can ever be lost)');
+  check(invertible, 'levelFromXp inverts xpForLevel exactly at every boundary');
+
+  const win = awardMatch({ won: true, kills: 2, deaths: 1, towerDamage: 200 });
+  const loss = awardMatch({ won: false, kills: 0, deaths: 3, towerDamage: 0 });
+  check(loss.gained < win.gained, 'a win with contribution beats a loss without');
+  const p = load();
+  check(p.matches === 2 && p.wins === 1 && p.deaths === 4, 'lifetime stats accumulate');
+  check(p.xp === win.gained + loss.gained, 'xp total is the sum of awards');
+
+  store.set('tank.profile', '{{{not json');
+  check(load().xp === 0, 'corrupt saved profile falls back to blank instead of throwing');
+}
+
 async function main() {
   checkProtocol();
   await checkInstantHits();
+  await checkProfile();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
   const srv = await startServer(PORT, { BOTS: '0' });

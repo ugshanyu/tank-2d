@@ -13,6 +13,7 @@ import { OBSTACLES, TOWERS } from '../shared/sim.js';
 // friend-vs-foe at a glance far more than you need to tell teammates apart.
 // Darkening the surround buys contrast against the arena for free.
 const SURROUND = '#05070b';
+const EMPTY_TOWER_STATE = [];
 const TEAM_COLORS = ['#4fc3f7', '#ff7a5e'];
 export const teamColor = (team) => TEAM_COLORS[team & 1];
 
@@ -56,6 +57,19 @@ export class Renderer {
     this.bg = null;          // prerendered static arena
     this.rings = new Map();  // team -> prerendered dashed range ring
     this._initParticles();
+    // Hull gradients live in the tank's LOCAL space, so they are identical for
+    // every tank of a team — building one per tank per frame was 240 gradient
+    // objects a second for no visual difference.
+    this._hullGrad = PALETTE.map((pal) => {
+      const g = this.ctx.createLinearGradient(0, -TANK_RADIUS, 0, TANK_RADIUS);
+      g.addColorStop(0, shade(pal.base, -0.10));
+      g.addColorStop(1, shade(pal.base, -0.55));
+      return g;
+    });
+    // Aim ray in a canonical space: built once, positioned by transform.
+    this._aimGrad = this.ctx.createLinearGradient(0, 0, 260, 0);
+    this._aimGrad.addColorStop(0, 'rgba(255,255,255,0.42)');
+    this._aimGrad.addColorStop(1, 'rgba(255,255,255,0)');
     this.resize();
     // iOS fires resize ~10x while the URL bar animates; each one would otherwise
     // reallocate a ~5 MB backing store and re-render the whole static layer.
@@ -373,7 +387,18 @@ export class Renderer {
     ctx.restore();
 
     // towers (the objective) sit under everything that moves
-    for (let i = 0; i < TOWERS.length; i++) this._tower(TOWERS[i], towerHp[i] ?? 0, state.myTeam);
+    // Towers track whatever they last shot at, and kick when they fire.
+    const tState = state.towers || EMPTY_TOWER_STATE;
+    for (let i = 0; i < TOWERS.length; i++) {
+      const ts = tState[i];
+      const since = ts ? now - ts.firedAt : 1e9;
+      this._tower(
+        TOWERS[i], towerHp[i] ?? 0, state.myTeam,
+        ts && ts.aim !== undefined ? ts.aim : null,
+        since < 180 ? 10 * (1 - since / 180) : 0,
+        now,
+      );
+    }
 
     // Emit particles once per effect, the frame it first appears.
     for (const e of state.effects) {
@@ -398,15 +423,19 @@ export class Renderer {
       const a = state.aimAngle;
       const ox = state.mePos.x + Math.cos(a) * (TANK_RADIUS + 10);
       const oy = state.mePos.y + Math.sin(a) * (TANK_RADIUS + 10);
-      const grad = ctx.createLinearGradient(ox, oy, ox + Math.cos(a) * 260, oy + Math.sin(a) * 260);
-      grad.addColorStop(0, 'rgba(255,255,255,0.30)');
-      grad.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.strokeStyle = grad;
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.rotate(a);
+      ctx.strokeStyle = this._aimGrad;
       ctx.lineWidth = 2 / cam.zoom;
+      ctx.setLineDash([10, 7]);
+      ctx.lineDashOffset = -(now * 0.2) % 17;
       ctx.beginPath();
-      ctx.moveTo(ox, oy);
-      ctx.lineTo(ox + Math.cos(a) * 260, oy + Math.sin(a) * 260);
+      ctx.moveTo(0, 0);
+      ctx.lineTo(260, 0);
       ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
     }
 
     // my tank — with barrel recoil and the reload arc
@@ -468,13 +497,14 @@ export class Renderer {
 
   // The match objective. Enemy towers show their engagement radius so you can
   // see the line you're about to cross; a destroyed tower is left as rubble.
-  _tower(tw, hp, myTeam) {
+  _tower(tw, hp, myTeam, aimAt, recoil, now) {
     const { ctx } = this;
     const R = TOWER_RADIUS;
     const pal = PALETTE[tw.team & 1];
     const color = pal.base;
     const dead = hp <= 0;
     const f = clamp(hp / TOWER_HP, 0, 1);
+    const spin = (now / 1000) * 0.35;
 
     ctx.save();
     ctx.translate(tw.x, tw.y);
@@ -497,14 +527,43 @@ export class Renderer {
       return;
     }
 
+    // Barrel. It is an auto-turret that shoots you every 1.1s and it had no
+    // visible weapon at all — you were killed by a thing that never moved.
+    if (aimAt !== null) {
+      ctx.save();
+      ctx.rotate(aimAt);
+      ctx.fillStyle = shade(color, -0.45);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.fillRect(R * 0.4 - recoil, -5.5, 34, 11);
+      ctx.strokeRect(R * 0.4 - recoil, -5.5, 34, 11);
+      ctx.restore();
+    }
+
+    // Slowly rotating inner ring: a static win condition reads as scenery.
+    ctx.save();
+    ctx.rotate(spin);
     octagon(ctx, R * 0.55);
     ctx.fillStyle = pal.towerCore;
     ctx.fill();
     ctx.strokeStyle = pal.towerRim;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(0, 0, R * 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // Core pulses; below a quarter health it flashes red as a panic tell.
+    const crit = f <= 0.25;
+    const pulse = 1 + 0.10 * Math.sin(now / (crit ? 150 : 420));
+    ctx.fillStyle = crit ? (Math.sin(now / 150) > 0 ? '#ff4d4d' : color) : color;
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.2 * pulse, 0, Math.PI * 2); ctx.fill();
+
+    // Damage states — smoke from the tower itself, so its condition is readable
+    // from across the arena without reading the bar.
+    if (f < 0.66 && Math.random() < (f < 0.33 ? 0.12 : 0.05)) {
+      this._spawnPart(tw.x + (Math.random() - 0.5) * R, tw.y + (Math.random() - 0.5) * R,
+        (Math.random() - 0.5) * 30, -20 - Math.random() * 30,
+        8 + Math.random() * 10, 0.9 + Math.random() * 0.6, 2, 'rgba(70,74,84,', 0.6);
+    }
 
     // HP bar at constant screen size (same reasoning as the tank labels)
     const k = 1 / this.cam.zoom;
@@ -557,11 +616,8 @@ export class Renderer {
     ctx.fillRect(-R + 5, -R + 1, R * 2 - 10, 7);
     ctx.fillRect(-R + 5, R - 8, R * 2 - 10, 7);
     // hull — build the rounded path once, then fill AND stroke it
-    const hg = ctx.createLinearGradient(0, -R, 0, R);
-    hg.addColorStop(0, shade(color, -0.10));
-    hg.addColorStop(1, shade(color, -0.55));
     roundRect(ctx, -R + 2, -R + 8, R * 2 - 4, R * 2 - 16, 6);
-    ctx.fillStyle = hg;
+    ctx.fillStyle = this._hullGrad[teamIdx & 1];
     ctx.fill();
     // dark keyline first, then the bright rim: the outline has to be the dominant
     // read at this size, and a 2.5px stroke resolves to 1.35 screen px.

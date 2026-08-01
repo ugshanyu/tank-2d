@@ -91,6 +91,20 @@
   #match .who { font-size: 40px; font-weight: 900; letter-spacing: 6px; }
   #match .sub { font-size: 15px; color: #9fb4d0; }
   #match .tally { font-size: 13px; color: #8b9dc0; letter-spacing: 1px; }
+  /* post-match scorecard: the six seconds between matches used to be two lines
+     of text and a countdown, with nothing to look at and nothing accumulating */
+  #match .card { display: flex; gap: 26px; margin-top: 6px; }
+  #match .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  #match .stat b { font-size: 26px; font-weight: 800; color: #e8eef7; }
+  #match .stat span { font-size: 10px; letter-spacing: 1.5px; color: #8b9dc0; text-transform: uppercase; }
+  #match .xp { width: 230px; margin-top: 10px; }
+  #match .xprow { display: flex; justify-content: space-between; font-size: 12px;
+    color: #8b9dc0; letter-spacing: 1px; margin-bottom: 5px; }
+  #match .xprow #xpLevel { color: #8be9fd; font-weight: 700; }
+  #match .xpbar { height: 7px; border-radius: 4px; background: rgba(255,255,255,.10); overflow: hidden; }
+  #match .xpbar i { display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, #35c3ef, #8be9fd);
+    transition: width .9s cubic-bezier(.16,1,.3,1); }
 
   /* 44x44pt minimum tap targets, per the iOS HIG */
   .icon-btn { position: absolute; width: 44px; height: 44px; display: flex;
@@ -223,8 +237,17 @@
 
 <div id="match">
   <div class="who" id="matchWho"></div>
-  <div class="sub" id="matchSub"></div>
   <div class="tally" id="matchTally"></div>
+  <div class="card" id="matchCard">
+    <div class="stat"><b id="stKills">0</b><span>kills</span></div>
+    <div class="stat"><b id="stDeaths">0</b><span>deaths</span></div>
+    <div class="stat"><b id="stTower">0</b><span>tower dmg</span></div>
+  </div>
+  <div class="xp">
+    <div class="xprow"><span id="xpLevel">LV 1</span><span id="xpGain">+0 XP</span></div>
+    <div class="xpbar"><i id="xpFill"></i></div>
+  </div>
+  <div class="sub" id="matchSub"></div>
 </div>
 
 <!-- Usion platform SDK: injected identity, wallet, rooms, direct-mode access.
