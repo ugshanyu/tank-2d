@@ -139,7 +139,10 @@ function armFirstGesture() {
     if (tilt === 'granted' && input.mode === 'tilt') {
       toast('Tilt to drive — settings has the pose presets', 2600);
     } else if (tilt === 'denied') {
-      toast('Motion access denied — drag the left side to drive', 3000);
+      // iOS remembers a refusal per origin, and a WebView whose host app does not
+      // implement the motion-permission delegate reports 'denied' with no prompt
+      // at all — so point at the retry rather than implying it is permanent.
+      toast('Motion blocked — joystick on the left. Retry in ⚙ Settings', 3400);
     } else if (tilt === 'unavailable') {
       toast('No motion sensor — drag the left side to drive', 3000);
     } else if (tilt === 'pending') {
