@@ -28,7 +28,7 @@ export class Input {
     this.isTouch = (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
       || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
     this.prefersTilt = this.isTouch;
-    this.tiltPreset = 'upright';
+    this.tiltPreset = 'angled';   // the pose most people actually hold a phone in
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
     try {
       const stored = localStorage.getItem('tank.tilt');
@@ -38,7 +38,7 @@ export class Input {
       // without one, applyTiltPreset would fail and we'd fall back to sampling.
       this._customBeta = Number(localStorage.getItem('tank.tiltBeta'));
       this.tiltPreset = (pose === 'custom' && Number.isFinite(this._customBeta)) ? 'custom'
-        : (TILT_PRESETS[pose] !== undefined ? pose : 'upright');
+        : (TILT_PRESETS[pose] !== undefined ? pose : 'angled');
     } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
@@ -155,7 +155,7 @@ export class Input {
       return true;
     }
     const beta = TILT_PRESETS[name];
-    if (beta === undefined) return this.applyTiltPreset('upright');
+    if (beta === undefined) return this.applyTiltPreset('angled');
     this.tiltPreset = name;
     this._beta0 = beta;
     this._gamma0 = 0;

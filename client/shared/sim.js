@@ -171,15 +171,33 @@ export function stepBullet(b, dt) {
     b.x += b.vx * h;
     b.y += b.vy * h;
 
+    // If this contact would exceed the bounce budget the shell dies AT the
+    // surface: clamp rather than reflect, so the impact burst lands on the wall
+    // instead of a few px back inside the arena (and, with bounces disabled
+    // entirely, the shell never briefly travels backwards on its last frame).
+    const terminal = b.bounces >= BULLET_MAX_BOUNCES;
     let bounced = false;
-    if (b.x < r) { b.x = r + (r - b.x); b.vx = -b.vx; bounced = true; }
-    if (b.x > ARENA_W - r) { b.x = (ARENA_W - r) - (b.x - (ARENA_W - r)); b.vx = -b.vx; bounced = true; }
-    if (b.y < r) { b.y = r + (r - b.y); b.vy = -b.vy; bounced = true; }
-    if (b.y > ARENA_H - r) { b.y = (ARENA_H - r) - (b.y - (ARENA_H - r)); b.vy = -b.vy; bounced = true; }
+    if (b.x < r) {
+      if (terminal) { b.x = r; return false; }
+      b.x = r + (r - b.x); b.vx = -b.vx; bounced = true;
+    }
+    if (b.x > ARENA_W - r) {
+      if (terminal) { b.x = ARENA_W - r; return false; }
+      b.x = (ARENA_W - r) - (b.x - (ARENA_W - r)); b.vx = -b.vx; bounced = true;
+    }
+    if (b.y < r) {
+      if (terminal) { b.y = r; return false; }
+      b.y = r + (r - b.y); b.vy = -b.vy; bounced = true;
+    }
+    if (b.y > ARENA_H - r) {
+      if (terminal) { b.y = ARENA_H - r; return false; }
+      b.y = (ARENA_H - r) - (b.y - (ARENA_H - r)); b.vy = -b.vy; bounced = true;
+    }
 
     for (const rect of OBSTACLES) {
       const n = resolveCircleRect(b, r, rect);
       if (n) {
+        if (terminal) return false;   // resolveCircleRect already put us on the face
         const vn = b.vx * n.nx + b.vy * n.ny;
         if (vn < 0) { b.vx -= 2 * vn * n.nx; b.vy -= 2 * vn * n.ny; }
         bounced = true;

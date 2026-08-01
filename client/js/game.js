@@ -80,6 +80,7 @@ export class Game {
     this._hitNonces = new Map();   // fire nonce -> {victim, at}
     this._predDmg = new Map();     // id -> {hp, at} predicted health, see displayHp()
     this._meHist = [];             // our own recent rendered positions, see meAt()
+    this._predDead = new Map();    // id -> when we already played their death
     this._myBids = new Set();      // server ids of shells I fired (for damage credit)
     this.pendingAward = null;      // match result awaiting XP award
 
@@ -184,8 +185,47 @@ export class Game {
     this.effects.push({ kind: 'hit', x, y, born: performance.now(), dur: 450 });
     this.predictDamage(victimId, serverHp);
     const mine = victimId === this.myId;
+    // FINAL HIT = IMMEDIATE DEATH. Waiting for the server's `death` event meant
+    // the killing blow landed, the target kept driving for a round trip, and only
+    // then blew up. If our predicted health just hit zero, kill it now.
+    if (this.displayHp(victimId, serverHp) <= 0) {
+      this._predictDeath(victimId, x, y);
+      return;
+    }
     this.shake = Math.max(this.shake, mine ? 7 : 3);
     this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x });
+  }
+
+  // A kill, played the instant the shell lands rather than a round trip later.
+  // The server is still the authority — this only brings the FEEDBACK forward,
+  // and the matching `death` event is suppressed so nothing plays twice.
+  _predictDeath(victimId, x, y) {
+    if (this._predDead.has(victimId)) return;
+    this._predDead.set(victimId, performance.now());
+
+    const team = victimId === this.myId ? this.myTeam : (this.teams.get(victimId) ?? 0);
+    this.effects.push({ kind: 'explosion', x, y, born: performance.now(), dur: 600, team });
+
+    if (victimId === this.myId) {
+      this.shake = Math.max(this.shake, 14);
+      this.hitstopMs = Math.max(this.hitstopMs, 70);
+      this.events.push({ kind: 'death' });
+    } else {
+      this.shake = Math.max(this.shake, 10);
+      this.hitstopMs = Math.max(this.hitstopMs, 55);
+      this.killBannerAt = performance.now();
+      this.killBannerName = this.names.get(victimId) || '';
+      this.events.push({ kind: 'kill' });
+    }
+  }
+
+  // Did we already play this death locally? Bounded so a stale entry can never
+  // suppress a real death later in the match.
+  _deathPredicted(id) {
+    const at = this._predDead.get(id);
+    if (at === undefined) return false;
+    if (performance.now() - at > 1500) { this._predDead.delete(id); return false; }
+    return true;
   }
 
   // Drop the health bar the moment the shell connects. Server HP arrives a round
@@ -345,7 +385,7 @@ export class Game {
       // dead: no prediction; camera stays where we died
       this.pending.length = 0;
       this.me.vx = 0; this.me.vy = 0;
-      if (wasAlive) {
+      if (wasAlive && !this._deathPredicted(this.myId)) {
         this.effects.push({ kind: 'explosion', x: this.me.x, y: this.me.y, born: performance.now(), dur: 600, team: this.myTeam });
         this.shake = Math.max(this.shake, 14);
         this.hitstopMs = 70;   // the freeze is what sells the impact
@@ -416,6 +456,7 @@ export class Game {
         this._hitBids.clear();
         this._hitNonces.clear();
         this._predDmg.clear();
+        this._predDead.clear();
         this._myBids.clear();
         this._resetMagazine();
         break;
@@ -464,6 +505,7 @@ export class Game {
         this.errX = 0; this.errY = 0;
         this._resetMagazine();
         this._predDmg.clear();
+        this._predDead.clear();
         this.matchDeaths = 0;
         this.matchTowerDamage = 0;
         for (const id of this.remotes.keys()) {
@@ -555,7 +597,7 @@ export class Game {
           this.matchDeaths += 1;
           this.respawnCountdown = performance.now() + RESPAWN_DELAY * 1000;
           this.killedBy = this.names.get(msg.killer) || (msg.killer >= 200 ? 'a tower' : '');
-        } else if (msg.killer === this.myId) {
+        } else if (msg.killer === this.myId && !this._deathPredicted(msg.victim)) {
           // A kill is the emotional peak of the match and it used to get less
           // feedback than being killed did: 4px of shake against 14px + a
           // full-screen vignette. Match the weight.
@@ -567,7 +609,7 @@ export class Game {
         }
         // Without this the 37-particle death burst only ever fired for YOUR own
         // death: a remote tank just silently vanished.
-        if (msg.victim !== this.myId) {
+        if (msg.victim !== this.myId && !this._deathPredicted(msg.victim)) {
           const buf = this.remotes.get(msg.victim);
           const last = buf && buf.length ? buf[buf.length - 1] : null;
           if (last) {
@@ -591,6 +633,7 @@ export class Game {
         const buf = this.remotes.get(msg.id);
         if (buf) buf.length = 0; // don't interpolate across a teleport
         this._breakSmoothing(msg.id);
+        this._predDead.delete(msg.id);
         if (msg.id === this.myId) { this._resetMagazine(); this._predDmg.delete(this.myId); }
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
@@ -702,7 +745,8 @@ export class Game {
       st.vx = b.vx; st.vy = b.vy;
       st.hull = hull; st.turret = turret;
       st.hp = this.displayHp(id, b.hp);
-      st.alive = b.alive; st.score = b.score; st.team = b.team;
+      st.alive = b.alive && !this._deathPredicted(id);
+      st.score = b.score; st.team = b.team;
       st.name = this.names.get(id) || '?';
       out.push(st);
     }

@@ -33,7 +33,11 @@ export const BULLET_SPEED = 1750;       // px/s (~8.5x tank speed) — a shell s
 export const BULLET_RADIUS = 5;
 export const BULLET_TTL = 1.2;          // seconds (2100px of travel: a cross-arena
                                         // shot plus a bounce, with margin)
-export const BULLET_MAX_BOUNCES = 1;    // dies on 2nd wall contact
+export const BULLET_MAX_BOUNCES = 0;    // no ricochet: a shell dies on the first
+                                        // wall it touches. Bounces made shots
+                                        // arrive from directions nobody aimed
+                                        // from, which reads as random at
+                                        // 1750 px/s.
 export const BULLET_DAMAGE = 28;        // 4 shells to kill
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
 export const FIRE_COOLDOWN = 0.16;      // s between shots inside a magazine (~6/s)

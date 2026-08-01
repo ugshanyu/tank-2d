@@ -547,16 +547,12 @@ function updateHud() {
   // team scoreboard: tower integrity is the win condition, kills are secondary
   const rows = game.scoreboard();
   const tHp = game.towerHp;
+  const teamKills = game.teamScores();
   let html = '';
   for (let team = 0; team < TEAM_NAMES.length; team++) {
     const pct = Math.round(Math.max(0, Math.min(1, (tHp[team] ?? 0) / TOWER_HP)) * 100);
     html += `<div class="hdr" style="color:${teamColor(team)}">`
-      + `${TEAM_NAMES[team]}${team === game.myTeam ? ' (you)' : ''} · tower ${pct}%</div>`;
-    for (const r of rows) {
-      if (r.team !== team) continue;
-      const tag = r.bot ? '<i>bot</i>' : '';
-      html += `<div class="row ${r.me ? 'me' : ''}"><span>${esc(r.name)}${tag}</span><span>${r.score}</span></div>`;
-    }
+      + `${TEAM_NAMES[team]}${team === game.myTeam ? ' (you)' : ''} ${pct}% · ${teamKills[team]}k</div>`;
   }
   const el = EL.scores;
   if (el.__last !== html) { el.innerHTML = html; el.__last = html; }

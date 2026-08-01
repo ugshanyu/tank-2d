@@ -430,10 +430,46 @@ async function checkTilt() {
   delete globalThis.screen; delete globalThis.DeviceOrientationEvent;
 }
 
+// A shell must die on the first wall it touches, and the killing blow must play
+// its death immediately rather than a round trip later.
+async function checkCombatRules() {
+  const { stepBullet } = await import('../client/shared/sim.js');
+  const { BULLET_MAX_BOUNCES, ARENA_W, BULLET_SPEED } = await import('../client/shared/protocol.js');
+  check(BULLET_MAX_BOUNCES === 0, 'shells do not ricochet');
+
+  // fire straight at the right wall from mid-arena and step until it dies
+  const b = { x: ARENA_W - 200, y: 640, vx: BULLET_SPEED, vy: 0, age: 0, bounces: 0 };
+  let alive = true, steps = 0;
+  while (alive && steps < 200) { alive = stepBullet(b, DT); steps++; }
+  check(!alive && b.vx > 0, `a shell dies at the wall instead of coming back (vx stayed ${Math.sign(b.vx)})`);
+
+  const { Game } = await import('../client/js/game.js');
+  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g.myId = 1; g.myTeam = 0;
+  g.teams.set(2, 1);
+  g.names.set(2, 'victim');
+
+  // last shell of four: the target is on BULLET_DAMAGE hp, so this kills.
+  g.bullets.set(1, { x: 0, y: 0, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1, bornMs: 0, simMs: 0 });
+  g.predictHit(1, false, 50, 50, 2, BULLET_DAMAGE);
+  check(g.effects.some((e) => e.kind === 'explosion'), 'the killing hit explodes immediately, not a round trip later');
+  check(g.killBannerAt > 0 && g.events.some((e) => e.kind === 'kill'), 'the kill is credited on the spot');
+  check(g.hitstopMs > 0, 'and it lands with hitstop');
+
+  // the server's own death event must then be swallowed, not replayed
+  const fx = g.effects.length;
+  const ev = g.events.length;
+  g.onEvent({ t: 'death', victim: 2, killer: 1 });
+  check(g.effects.length === fx, 'the server death event does not double-explode');
+  check(g.events.filter((e) => e.kind === 'kill').length === 1, 'nor double-credit the kill');
+  check(g.feed.length === 1, 'but the kill feed still records it exactly once');
+}
+
 async function main() {
   checkProtocol();
   await checkServiceId();
   await checkTilt();
+  await checkCombatRules();
   await checkInstantHits();
   await checkProfile();
   await checkAuth();

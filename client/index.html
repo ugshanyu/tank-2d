@@ -26,21 +26,21 @@
   #hud { position: fixed; inset: 0; pointer-events: none;
     padding: calc(var(--sat) + 10px) calc(var(--sar) + 12px)
              calc(var(--sab) + 10px) calc(var(--sal) + 12px); }
-  #scores { position: absolute; top: inherit; left: inherit; font-size: 13px; line-height: 1.5;
-    background: rgba(6,10,18,0.55); border-radius: 10px; padding: 8px 12px; min-width: 110px;
-    top: calc(var(--sat) + 10px); left: calc(var(--sal) + 12px); }
+  #scores { position: absolute; font-size: 12px; line-height: 1.35;
+    background: rgba(6,10,18,0.5); border-radius: 9px; padding: 5px 9px;
+    top: calc(var(--sat) + 8px); left: calc(var(--sal) + 10px); }
   #scores .me { color: #8be9fd; font-weight: 700; }
-  #status { position: absolute; top: calc(var(--sat) + 10px);
-    right: calc(var(--sar) + 12px); text-align: right; font-size: 12px;
-    color: #9fb4d0; background: rgba(6,10,18,0.55); border-radius: 10px; padding: 8px 12px; }
-  #status .bad { color: #ff8a80; }
+  /* Ping/status readout removed: it was chrome the player could not act on, and
+     it cost a permanent panel over the top-right of the arena. Connection trouble
+     is surfaced by the #offline overlay instead, which is unmissable. */
+  #status { display: none !important; }
   /* Hidden: it duplicated the settings sheet's "Level now" row while sitting in
      the joystick zone, so resting a driving thumb re-levelled tilt mid-drive. */
   #calibrate { display: none !important; }
   /* kill feed — a 2v2 had no readable narrative; you never saw who killed whom */
   #feed { position: absolute; top: calc(var(--sat) + 10px); right: calc(var(--sar) + 12px);
     display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
-    margin-top: 40px; font-size: 12px; }
+    font-size: 12px; }
   #feed div { background: rgba(6,10,18,0.6); border-radius: 7px; padding: 3px 8px;
     animation: slidein .18s ease-out both; }
   @keyframes slidein { from { opacity: 0; transform: translateX(14px); } }
@@ -70,8 +70,7 @@
 
   /* team scoreboard rows */
   #scores .row { display: flex; justify-content: space-between; gap: 10px; }
-  #scores .hdr { font-weight: 800; letter-spacing: 1px; font-size: 11px; opacity: .85; margin-top: 4px; }
-  #scores .hdr:first-child { margin-top: 0; }
+  #scores .hdr { font-weight: 800; letter-spacing: .5px; font-size: 12px; white-space: nowrap; }
   #scores .me { font-weight: 700; }
   #scores i { font-style: normal; font-size: 11px; letter-spacing: .5px; color: #8b9dc0;
     border: 1px solid #33405c; border-radius: 4px; padding: 0 3px; margin-left: 5px;
