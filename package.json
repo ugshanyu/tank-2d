@@ -1,9 +1,9 @@
 {
-  "name": "tank",
+  "name": "tank-2d",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "TANK — realtime multiplayer tilt-to-drive tank arena. Authoritative server + client prediction template.",
+  "description": "TANK 2D — realtime multiplayer tank arena, 2D canvas renderer. Authoritative server + client prediction template.",
   "scripts": {
     "start": "node server/server.js",
     "dev": "node server/server.js",
