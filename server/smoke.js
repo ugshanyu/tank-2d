@@ -133,8 +133,46 @@ function checkProtocol() {
   check(rt(-5) === 0, 'negative lagTicks clamped');
 }
 
+// Client-side hit prediction: the impact must play the instant the shell connects
+// on screen, and the server's echo must then be swallowed rather than replayed.
+// game.js imports only pure modules, so it runs headless.
+async function checkInstantHits() {
+  const { Game } = await import('../client/shared/../js/game.js');
+  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g.myId = 1;
+
+  // a shell of mine, still predicted (no server id yet)
+  g.predicted.set(7, { x: 100, y: 100, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1 });
+  g.predictHit(7, true, 100, 100, 2);
+  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'impact plays immediately on a local hit');
+  check(g.events.filter((e) => e.kind === 'hit').length === 1, 'hit sound/haptic fires immediately');
+  check(!g.predicted.has(7), 'locally-resolved shell is removed at once');
+
+  // the same shot is idempotent if the frame runs twice
+  g.predictHit(7, true, 100, 100, 2);
+  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'local hit is not double-played');
+
+  // the fire echo must not resurrect the shell
+  g.onEvent({ t: 'fire', id: 1, bid: 55, nonce: 7, x: 100, y: 100, a: 0, tick: 0 });
+  check(!g.bullets.has(55), 'server fire echo does not resurrect a resolved shell');
+
+  // ...and the impact echo must be swallowed, not replayed
+  const before = g.effects.length;
+  const evBefore = g.events.length;
+  g.onEvent({ t: 'bx', bid: 55, x: 100, y: 100, hit: 2, tower: -1 });
+  check(g.effects.length === before, 'server bx echo does not double-flash the impact');
+  check(g.events.length === evBefore, 'server bx echo does not double-play the sound');
+  check(!g.bullets.has(55), 'shell gone after the echo');
+
+  // an UNPREDICTED hit still plays normally from the server
+  g.bullets.set(56, { x: 5, y: 5, vx: 0, vy: 0, age: 0, bounces: 0, owner: 2, bornMs: 0, simMs: 0 });
+  g.onEvent({ t: 'bx', bid: 56, x: 5, y: 5, hit: 1, tower: -1 });
+  check(g.effects.length === before + 1, 'server-only impacts still play');
+}
+
 async function main() {
   checkProtocol();
+  await checkInstantHits();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
   const srv = await startServer(PORT, { BOTS: '0' });

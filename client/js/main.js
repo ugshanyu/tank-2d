@@ -6,6 +6,7 @@
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
 import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
+  TANK_RADIUS, BULLET_RADIUS,
 } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
@@ -28,6 +29,16 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
+const HIT_RADIUS = TANK_RADIUS + BULLET_RADIUS;
+
+// closest distance from segment (x1,y1)-(x2,y2) to a point — same swept test the
+// server runs, so the local verdict and the authoritative one agree
+function segPointDist(x1, y1, x2, y2, cx, cy) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2)) : 0;
+  return Math.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy));
+}
 
 // Safe-area insets are 0 inside a nested browsing context. If we are framed, fall
 // back to values that clear a notch/Dynamic Island and the home indicator.
@@ -351,6 +362,7 @@ function startNet(resolveUrl) {
       const o = take(); bi++;
       o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
       o.mine = b.owner === game.myId;
+      o.key = bid; o.isNonce = false; o.prevX = b.x; o.prevY = b.y;
       bullets.push(o);
     }
     for (const nonce of game.predicted.keys()) {
@@ -358,6 +370,7 @@ function startNet(resolveUrl) {
       const o = take(); bi++;
       o.x = b.x + b.vx * acc; o.y = b.y + b.vy * acc; o.vx = b.vx; o.vy = b.vy;
       o.mine = true;
+      o.key = nonce; o.isNonce = true; o.prevX = b.x; o.prevY = b.y;
       bullets.push(o);
     }
 
@@ -376,6 +389,21 @@ function startNet(resolveUrl) {
     drawState.myTeam = game.myTeam;
     drawState.towerHp = game.towerHp;
     drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
+
+    // Resolve MY shells against exactly the tanks being drawn this frame, so an
+    // impact lands the instant it connects on screen instead of a round trip
+    // later. Swept (previous->current) so a fast shell can't skip a target.
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      if (!b.mine) continue;
+      for (const t of drawState.others) {
+        if (!t.alive) continue;
+        if (segPointDist(b.prevX, b.prevY, b.x, b.y, t.x, t.y) >= HIT_RADIUS) continue;
+        game.predictHit(b.key, b.isNonce, b.x, b.y, t.id);
+        bullets.splice(i, 1);
+        break;
+      }
+    }
     drawState.effects = game.effects;
     drawState.joy = input.joy;
     drawState.joyMax = input.joyMax;

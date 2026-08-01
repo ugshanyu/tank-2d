@@ -69,6 +69,11 @@ export class Game {
     this._remoteOut = [];
     this._remotePool = new Map();  // id -> reusable render state + its err offset
 
+    // Hits we already resolved locally, so the server's echo doesn't double-play
+    // the impact. See predictHit().
+    this._hitBids = new Set();
+    this._hitNonces = new Set();
+
     // impulses the renderer/audio layer drains each frame
     this.shake = 0;               // screen-shake magnitude request, px
     this.hitstopMs = 0;           // freeze the sim this long for impact weight
@@ -124,6 +129,29 @@ export class Game {
   // rate: any frame that skipped a tick stretched the cooldown in real time.
   _cooldownReady() {
     return performance.now() >= this._nextFireAtMs;
+  }
+
+  // INSTANT HITS. The server is still the authority on damage, but waiting for its
+  // `bx` echo meant the impact — flash, sound, shake — landed a full round trip
+  // after the shell visibly connected on YOUR screen. Since the server rewinds to
+  // exactly the view we are testing against here (lag compensation), the local
+  // verdict and the authoritative one agree on all but grazing shots, so we can
+  // show the impact immediately and let the echo be a silent confirmation.
+  //
+  // `key` is the bullet's bid if confirmed, or its fire nonce if still predicted.
+  predictHit(key, isNonce, x, y, victimId) {
+    if (isNonce) {
+      if (this._hitNonces.has(key)) return;
+      this._hitNonces.add(key);
+      this.predicted.delete(key);
+    } else {
+      if (this._hitBids.has(key)) return;
+      this._hitBids.add(key);
+      this.bullets.delete(key);
+    }
+    this.effects.push({ kind: 'hit', x, y, born: performance.now(), dur: 450 });
+    this.shake = Math.max(this.shake, 3);
+    this.events.push({ kind: 'hit', key: victimId, x });
   }
 
   // Ids are recycled aggressively (lowest free 1..4, and a bot refills a vacated
@@ -301,6 +329,8 @@ export class Game {
         this.towerHp = [TOWER_HP, TOWER_HP];
         this.bullets.clear();
         this.predicted.clear();
+        this._hitBids.clear();
+        this._hitNonces.clear();
         this.pending.length = 0;
         this.errX = 0; this.errY = 0;
         this._nextFireAtMs = 0;
@@ -311,6 +341,13 @@ export class Game {
         break;
       case 'fire': {
         const bornMs = msg.tick * DT * 1000;
+        // We already resolved this shot locally — adopt the server's id so the
+        // matching `bx` stays suppressed, and don't resurrect the shell.
+        if (msg.id === this.myId && this._hitNonces.has(msg.nonce)) {
+          this._hitNonces.delete(msg.nonce);
+          this._hitBids.add(msg.bid);
+          break;
+        }
         if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
           // my predicted bullet confirmed: hand it to the confirmed set under
           // the server's id, keeping its predicted position (continuity). Its
@@ -336,6 +373,13 @@ export class Game {
         break;
       }
       case 'bx': {
+        // Already played locally the moment it connected on screen — the echo is
+        // just confirmation, so swallow it rather than double-flashing.
+        if (this._hitBids.has(msg.bid)) {
+          this._hitBids.delete(msg.bid);
+          this.bullets.delete(msg.bid);
+          break;
+        }
         // Spawn the burst where OUR copy of the shell actually is. The client copy
         // deliberately runs ~1 RTT ahead of the server's authoritative position, so
         // using msg.x/msg.y made your own shell fly visibly past the impact and the

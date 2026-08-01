@@ -27,13 +27,17 @@ export const MAX_HP = 100;
 // reading as a SHOT and starts reading as a slow object you steer around. 900 px/s
 // crosses the arena in 1.4 s and lands like a gun. Damage drops so faster shells
 // don't halve time-to-kill: 4 hits instead of 3.
-export const BULLET_SPEED = 900;        // px/s (~4.4x tank speed)
+export const BULLET_SPEED = 1150;       // px/s (~5.6x tank speed) — a shell should
+                                        // read as a SHOT, arriving almost as fast as
+                                        // you can register having fired it
 export const BULLET_RADIUS = 5;
-export const BULLET_TTL = 1.8;          // seconds (must outlast a cross-arena shot + bounce)
+export const BULLET_TTL = 1.6;          // seconds (must outlast a cross-arena shot + bounce)
 export const BULLET_MAX_BOUNCES = 1;    // dies on 2nd wall contact
 export const BULLET_DAMAGE = 28;        // 4 shells to kill
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
-export const FIRE_COOLDOWN = 0.33;      // s between shots (server-enforced)
+export const FIRE_COOLDOWN = 0.20;      // s between shots (server-enforced) — 5/s.
+                                        // 0.33 left a third of a second of dead
+                                        // trigger, which reads as unresponsive.
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
 export const RESPAWN_DELAY = 2.5;       // seconds
@@ -50,9 +54,9 @@ export const FRIENDLY_FIRE = true;      // shells damage teammates and your own 
 // Tower fire is server-authoritative and event-sourced exactly like tank fire —
 // clients replay the 'fire' event, they never predict tower AI.
 export const TOWER_RADIUS = 44;
-export const TOWER_HP = 400;            // 12 shell hits at BULLET_DAMAGE 34 — a lone
-                                        // tank can just barely solo it if it dodges;
-                                        // two tanks make it comfortable
+export const TOWER_HP = 320;            // ~11 shells. Measured pace put a match at
+                                        // 2-3 min at 400 HP, which is a slog on
+                                        // mobile; this targets ~90 s.
 export const TOWER_RANGE = 330;         // px; enemies must commit to get in range
 export const TOWER_FIRE_COOLDOWN = 1.1; // s between tower shots
 export const TOWER_MUZZLE_OFFSET = 58;  // > TOWER_RADIUS + BULLET_RADIUS so a shell
