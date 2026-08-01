@@ -363,9 +363,77 @@ async function checkServiceId() {
     `dev fallback URL matches the service (${client.DEV_SERVER_URL})`);
 }
 
+// TILT IS THE HEADLINE CONTROL SCHEME and it silently never engaged: the sensor
+// got a 1.2s deadline to produce its first reading, and a WKWebView routinely
+// takes longer. Missing that window left tiltReady false forever, which ALSO
+// disabled the Tilt option in settings — so there was no way back to it.
+async function checkTilt() {
+  const listeners = new Map();
+  const el = () => ({ style: {}, tabIndex: 0, addEventListener() {}, focus() {} });
+  globalThis.window = {
+    addEventListener: (t, fn) => { if (!listeners.has(t)) listeners.set(t, []); listeners.get(t).push(fn); },
+    removeEventListener: (t, fn) => {
+      const a = listeners.get(t) || [];
+      const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+    },
+    focus() {},
+  };
+  // Signal "phone" via the coarse-pointer query; globalThis.navigator is
+  // read-only in modern Node and cannot be replaced.
+  globalThis.matchMedia = (q) => ({ matches: q === '(pointer: coarse)', addEventListener() {} });
+  globalThis.screen = { orientation: { angle: 0, addEventListener() {} } };
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+  };
+  // Android-WebView shape: the type exists, but there is no permission API.
+  globalThis.DeviceOrientationEvent = function DeviceOrientationEvent() {};
+
+  const { Input } = await import('../client/js/input.js');
+  const input = new Input(el());
+  const emit = (beta, gamma) => {
+    for (const fn of listeners.get('deviceorientation') || []) fn({ beta, gamma });
+  };
+
+  check(input.tiltSupported(), 'tilt is offered whenever the device type exists');
+  check(input.prefersTilt === true, 'tilt is the DEFAULT on a touch device');
+
+  const verdict = await input.requestTilt();
+  check(verdict === 'pending', 'a sensor that has not reported yet is "pending", not a hard failure');
+  check(input.tiltSupported(), 'the settings toggle stays available while pending');
+
+  // The whole point: a reading that arrives LATE must still turn tilt on.
+  emit(30, 0);
+  check(input.tiltReady === true, 'a late first reading still enables tilt');
+  check(input.mode === 'tilt', 'and the game switches to tilt steering when that is the preference');
+
+  // Held at the posture the player selected, the tank must sit still. (The
+  // smoothing is time-based, so settle it before sampling.)
+  // The reading is eased on WALL CLOCK, so real time has to pass between polls.
+  const settle = async (beta) => {
+    for (let i = 0; i < 5; i++) { emit(beta, 0); await sleep(60); input.poll(); }
+  };
+  const neutral = input._beta0;
+  await settle(neutral);
+  const idle = Math.abs(input.moveX) + Math.abs(input.moveY);
+  check(idle < 0.05, `holding the chosen posture does not drive the tank (${idle.toFixed(3)})`);
+
+  // ...and tilting past the range drives it at full speed.
+  await settle(neutral + 20);
+  check(input.moveY > 0.9,
+    `tilting past the range drives at full speed (moveY=${input.moveY.toFixed(2)})`);
+  await settle(neutral - 20);
+  check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
+
+  delete globalThis.window; delete globalThis.matchMedia;
+  delete globalThis.screen; delete globalThis.DeviceOrientationEvent;
+}
+
 async function main() {
   checkProtocol();
   await checkServiceId();
+  await checkTilt();
   await checkInstantHits();
   await checkProfile();
   await checkAuth();

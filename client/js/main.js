@@ -100,6 +100,12 @@ function boot() {
 function onReady() {
   if (started) return;
   started = true;
+  // The sensor can wake up seconds after the permission prompt; when it does,
+  // adopt tilt (if that is the preference) and tell the player.
+  input.onTiltReady = () => {
+    syncSheet();
+    if (input.mode === 'tilt') toast('Tilt enabled — tilt your phone to drive', 2400);
+  };
   armFirstGesture();
   wireUi();
   EL.calibrate.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
@@ -133,7 +139,13 @@ function armFirstGesture() {
     if (tilt === 'granted' && input.mode === 'tilt') {
       toast('Tilt to drive — settings has the pose presets', 2600);
     } else if (tilt === 'denied') {
-      toast('Motion denied — drag the left side to drive', 2600);
+      toast('Motion access denied — drag the left side to drive', 3000);
+    } else if (tilt === 'unavailable') {
+      toast('No motion sensor — drag the left side to drive', 3000);
+    } else if (tilt === 'pending') {
+      // The sensor has not reported yet. It still might; onTiltReady switches us
+      // over if it does, so do not tell the player tilt is gone.
+      toast('Drag the left side to drive', 2600);
     }
     // The permission modal can swallow pointerup, leaving a phantom held touch.
     input.clearTouches();
@@ -186,7 +198,7 @@ function openSheet(open) {
 function syncSheet() {
   EL.optStick.classList.toggle('sel', input.mode !== 'tilt');
   EL.optTilt.classList.toggle('sel', input.mode === 'tilt');
-  EL.optTilt.disabled = !input.tiltReady;
+  EL.optTilt.disabled = !input.tiltSupported();
   EL.optSound.textContent = sfx.muted ? 'Off' : 'On';
   EL.optHaptics.textContent = hapticsOn ? 'On' : 'Off';
   const s = getShakeScale();

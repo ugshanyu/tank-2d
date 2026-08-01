@@ -66,9 +66,39 @@ export class Input {
     this._attach();
   }
 
-  // Must be called from a user gesture (button tap). Returns 'granted' | 'denied' | 'unavailable'.
+  // ONE persistent orientation listener, attached once and never torn down.
+  //
+  // This used to live inside requestTilt() behind a 1.2 s deadline: if the sensor
+  // hadn't produced a reading by then we returned 'unavailable', tiltReady stayed
+  // false FOREVER, and — because the settings sheet disables the Tilt button on
+  // !tiltReady — the player had no way to turn it on afterwards. A WKWebView
+  // routinely takes longer than 1.2 s to spin the sensor up, and some deliver a
+  // null-valued event first, so the headline control scheme silently never
+  // engaged. Now a reading is accepted whenever it arrives, however late.
+  _attachOrientation() {
+    if (this._orientationAttached) return;
+    this._orientationAttached = true;
+    window.addEventListener('deviceorientation', (e) => {
+      if (e.beta === null || e.gamma === null) return;   // desktop fires empty events
+      this._beta = e.beta;
+      this._gamma = e.gamma;
+      if (this._sBeta === null) { this._sBeta = e.beta; this._sGamma = e.gamma; }
+      if (this.tiltReady) return;
+      // First real reading, whenever it lands.
+      this.tiltReady = true;
+      this.applyTiltPreset(this.tiltPreset);
+      if (this.prefersTilt) this.setMode('tilt');
+      if (this.onTiltReady) this.onTiltReady();
+    });
+  }
+
+  // Must be called from a user gesture (button tap).
+  // Returns 'granted' | 'denied' | 'unavailable' | 'pending'.
   async requestTilt() {
     if (typeof DeviceOrientationEvent === 'undefined') return 'unavailable';
+    // Attach BEFORE asking: on platforms with no permission API (Android WebView,
+    // older iOS) events start flowing immediately and we must not miss them.
+    this._attachOrientation();
     try {
       if (typeof DeviceOrientationEvent.requestPermission === 'function') {
         const res = await DeviceOrientationEvent.requestPermission(); // iOS 13+
@@ -77,34 +107,17 @@ export class Input {
     } catch {
       return 'denied';
     }
-    return await new Promise((resolve) => {
-      let settled = false;
-      const onFirst = (e) => {
-        if (settled) return;
-        if (e.beta === null || e.gamma === null) return; // desktop fires empty events
-        settled = true;
-        this.tiltReady = true;
-        // Do NOT force mode='tilt' here. Granting motion used to lock the player
-        // into tilt steering forever with no code path back — miserable on a bus
-        // or lying down, and it silently killed a joystick drag already in
-        // progress. Tilt is now opt-in and remembered.
-        this._beta = e.beta; this._gamma = e.gamma;
-        this._sBeta = e.beta; this._sGamma = e.gamma;
-        // Deliberately NOT calibrate() here. This fires while the player is still
-        // tapping the iOS permission dialog — the worst possible moment to sample
-        // "how are you holding the phone". Start from the posture preset instead.
-        this.applyTiltPreset(this.tiltPreset);
-        if (this.prefersTilt) this.setMode('tilt');
-        window.removeEventListener('deviceorientation', onFirst);
-        resolve('granted');
-      };
-      window.addEventListener('deviceorientation', onFirst);
-      window.addEventListener('deviceorientation', (e) => {
-        if (e.beta === null) return;
-        this._beta = e.beta; this._gamma = e.gamma;
-      });
-      setTimeout(() => { if (!settled) { settled = true; resolve('unavailable'); } }, 1200);
-    });
+    if (this.tiltReady) return 'granted';
+    // Give the sensor a generous window, but 'pending' is NOT terminal — the
+    // listener above stays live and will flip to tilt whenever data shows up.
+    await new Promise((r) => setTimeout(r, 2500));
+    return this.tiltReady ? 'granted' : 'pending';
+  }
+
+  // Can this device ever do tilt? Used to decide whether to offer the option at
+  // all, rather than whether it has already succeeded.
+  tiltSupported() {
+    return typeof DeviceOrientationEvent !== 'undefined';
   }
 
   // Switching control scheme mid-match must cancel any stick the thumb is holding,
