@@ -5,15 +5,36 @@
 const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
 const JOY_MAX = 78;          // px of drag for full joystick deflection (64 was
                              // twitchy under a thumb arc on a 375px screen)
+const TILT_SMOOTH_TAU = 0.045;  // s — ease toward the sensor reading instead of
+                                // consuming it raw; accelerometer noise otherwise
+                                // makes the tank twitch when you hold still
+
+// Neutral device pitch (deviceorientation `beta`) per posture. Beta is 0 with the
+// phone flat on a table and 90 held upright. Nobody plays at either extreme, so
+// the default neutral is tilted toward the face — the "Regular" of Tilt to Live,
+// whose post-mortem is the reason these are PRESETS rather than auto-detected:
+// sampling neutral from whatever pose the player happened to be in produces
+// "the calibration is royally screwed up".
+export const TILT_PRESETS = { upright: 55, angled: 32, flat: 6 };
 
 export class Input {
   constructor(canvas) {
     this.canvas = canvas;
     this.joyMax = JOY_MAX;
     this.mode = 'stick';               // 'tilt' | 'stick' (stick also covers kbd)
-    this.prefersTilt = false;          // remembered choice; stick is the default
+    // Tilt is the intended way to play on a phone, so it is the DEFAULT on any
+    // touch device — but it stays switchable, because being locked into tilt with
+    // no way back is miserable on a bus or lying down.
+    this.isTouch = (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
+      || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
+    this.prefersTilt = this.isTouch;
+    this.tiltPreset = 'upright';
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
-    try { this.prefersTilt = localStorage.getItem('tank.tilt') === '1'; } catch { /* private mode */ }
+    try {
+      const stored = localStorage.getItem('tank.tilt');
+      if (stored !== null) this.prefersTilt = stored === '1';
+      this.tiltPreset = localStorage.getItem('tank.tiltPose') || 'upright';
+    } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
     this.firing = false;
@@ -25,6 +46,9 @@ export class Input {
     this._gamma0 = null;
     this._beta = null;
     this._gamma = null;
+    this._sBeta = null;                // smoothed sensor reading (see poll)
+    this._sGamma = null;
+    this._tiltAt = 0;
     this.tiltReady = false;
 
     // joystick
@@ -59,9 +83,13 @@ export class Input {
         // into tilt steering forever with no code path back — miserable on a bus
         // or lying down, and it silently killed a joystick drag already in
         // progress. Tilt is now opt-in and remembered.
-        if (this.prefersTilt) this.setMode('tilt');
         this._beta = e.beta; this._gamma = e.gamma;
-        this.calibrate();
+        this._sBeta = e.beta; this._sGamma = e.gamma;
+        // Deliberately NOT calibrate() here. This fires while the player is still
+        // tapping the iOS permission dialog — the worst possible moment to sample
+        // "how are you holding the phone". Start from the posture preset instead.
+        this.applyTiltPreset(this.tiltPreset);
+        if (this.prefersTilt) this.setMode('tilt');
         window.removeEventListener('deviceorientation', onFirst);
         resolve('granted');
       };
@@ -95,8 +123,26 @@ export class Input {
     this.firing = false;
   }
 
+  // One of three postures. Cheaper for the player than "hold still and tap" and
+  // it survives them shifting position, which auto-calibration does not.
+  applyTiltPreset(name) {
+    const beta = TILT_PRESETS[name];
+    if (beta === undefined) return false;
+    this.tiltPreset = name;
+    this._beta0 = beta;
+    this._gamma0 = 0;
+    try { localStorage.setItem('tank.tiltPose', name); } catch { /* ignore */ }
+    return true;
+  }
+
+  // Manual "Level now": whatever pose you are in right now becomes neutral.
   calibrate() {
-    if (this._beta !== null) { this._beta0 = this._beta; this._gamma0 = this._gamma; }
+    if (this._beta !== null) {
+      this._beta0 = this._sBeta ?? this._beta;
+      this._gamma0 = this._sGamma ?? this._gamma;
+      this.tiltPreset = 'custom';
+      try { localStorage.setItem('tank.tiltPose', 'custom'); } catch { /* ignore */ }
+    }
   }
 
   _screenAngle() {
@@ -114,10 +160,22 @@ export class Input {
     if (this._keys.has('KeyS') || this._keys.has('ArrowDown')) ky += 1;
 
     if (this.mode === 'tilt' && this.tiltReady && this._beta0 !== null) {
+      // Ease toward the sensor reading rather than consuming it raw. Accelerometer
+      // noise is a few tenths of a degree frame to frame, which is enough to make
+      // a stationary tank jitter; a ~45ms time constant kills that without any
+      // perceptible lag on a real wrist movement.
+      const now = performance.now();
+      const dtS = Math.min(0.1, Math.max(0, (now - (this._tiltAt || now)) / 1000));
+      this._tiltAt = now;
+      const k = 1 - Math.exp(-dtS / TILT_SMOOTH_TAU);
+      if (this._sBeta === null || this._sBeta === undefined) { this._sBeta = this._beta; this._sGamma = this._gamma; }
+      this._sBeta += wrapDeg(this._beta - this._sBeta) * k;
+      this._sGamma += wrapDeg(this._gamma - this._sGamma) * k;
+
       // shortest-signed-angle deltas: beta/gamma wrap at ±180/±90, and a raw
       // subtraction across the wrap would slam movement to full speed backwards
-      const db = wrapDeg(this._beta - this._beta0);
-      const dg = wrapDeg(this._gamma - this._gamma0);
+      const db = wrapDeg(this._sBeta - this._beta0);
+      const dg = wrapDeg(this._sGamma - this._gamma0);
       // rotate device axes into screen axes
       const angle = this._screenAngle();
       let x, y;
@@ -203,8 +261,12 @@ export class Input {
     c.addEventListener('pointercancel', release);
     c.addEventListener('lostpointercapture', release);
 
-    // the tilt neutral is orientation-relative: recalibrate after rotation settles
-    const onOrient = () => setTimeout(() => this.calibrate(), 700);
+    // Only a CUSTOM neutral is pose-dependent; the presets are absolute, and
+    // silently re-sampling neutral on a rotation is precisely the auto-calibration
+    // that gets reported as "the calibration is royally screwed up".
+    const onOrient = () => setTimeout(() => {
+      if (this.tiltPreset === 'custom') this.calibrate();
+    }, 700);
     if (screen.orientation && screen.orientation.addEventListener) {
       screen.orientation.addEventListener('change', onOrient);
     } else {

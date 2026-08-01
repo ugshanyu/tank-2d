@@ -5,7 +5,7 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP,
-  TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
+  TOWER_RADIUS, TOWER_HP, TOWER_RANGE, MAG_SIZE,
 } from '../shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../shared/sim.js';
 
@@ -245,6 +245,7 @@ export class Renderer {
       this._tank(
         state.mePos.x, state.mePos.y, state.mePos.hull, state.aimAngle,
         state.myTeam, state.meName, state.me.hp ?? MAX_HP, true, recoil, state.reload ?? 1,
+        state.ammo ?? MAG_SIZE, !!state.reloading,
       );
     }
 
@@ -357,7 +358,7 @@ export class Renderer {
     ctx.restore();
   }
 
-  _tank(x, y, hull, turret, teamIdx, name, hp, isMe, recoil = 0, reload = 1) {
+  _tank(x, y, hull, turret, teamIdx, name, hp, isMe, recoil = 0, reload = 1, ammo = MAG_SIZE, isReloading = false) {
     const { ctx } = this;
     const R = TANK_RADIUS;
     const color = PALETTE[teamIdx & 1].base;
@@ -399,11 +400,23 @@ export class Renderer {
       ctx.strokeStyle = 'rgba(255,255,255,0.20)';
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(0, 0, R + 8, 0, Math.PI * 2); ctx.stroke();
-      ctx.strokeStyle = reload >= 1 ? 'rgba(255,255,255,0.95)' : 'rgba(139,233,253,0.9)';
+      ctx.strokeStyle = isReloading ? 'rgba(255,190,90,0.95)'
+        : reload >= 1 ? 'rgba(255,255,255,0.95)' : 'rgba(139,233,253,0.9)';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.arc(0, 0, R + 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(reload, 0, 1));
       ctx.stroke();
+
+      // Ammo pips around the ring — you need to know how many rounds are left
+      // without doing arithmetic on an arc.
+      const pipR = R + 15;
+      for (let i = 0; i < MAG_SIZE; i++) {
+        const a = -Math.PI / 2 + (i / MAG_SIZE) * Math.PI * 2;
+        ctx.fillStyle = i < ammo ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.18)';
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * pipR, Math.sin(a) * pipR, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     // name + hp — drawn at constant SCREEN size. The fit-to-arena zoom is ~0.54

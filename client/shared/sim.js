@@ -5,7 +5,7 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, TANK_MAX_SPEED, TANK_ACCEL, TANK_BRAKE, HULL_TURN_RATE,
-  BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, TOWER_RADIUS, wrapAngle,
+  BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, TOWER_RADIUS, MAG_SIZE, wrapAngle,
 } from './protocol.js';
 
 // ---- Map: axis-aligned obstacle rects ----
@@ -205,5 +205,5 @@ export function stepBullet(b, dt) {
 }
 
 export function makeTank(id, x, y, team = 0) {
-  return { id, x, y, vx: 0, vy: 0, hull: 0, turret: 0, hp: 100, alive: true, score: 0, team };
+  return { id, x, y, vx: 0, vy: 0, hull: 0, turret: 0, hp: 100, alive: true, score: 0, team, ammo: MAG_SIZE };
 }

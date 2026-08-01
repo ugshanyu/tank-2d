@@ -25,7 +25,7 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
-                  'feed', 'killbanner']) {
+                  'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat']) {
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
@@ -119,9 +119,10 @@ function armFirstGesture() {
     input.suppressNextPointer = true;   // this tap opens a modal; it is not a shot
 
     const tilt = await input.requestTilt();
-    if (tilt === 'granted') {
-      EL.calibrate.style.display = input.mode === 'tilt' ? 'block' : 'none';
-      if (input.mode === 'tilt') toast('Tilt enabled — hold your phone level');
+    if (tilt === 'granted' && input.mode === 'tilt') {
+      toast('Tilt to drive — settings has the pose presets', 2600);
+    } else if (tilt === 'denied') {
+      toast('Motion denied — drag the left side to drive', 2600);
     }
     // The permission modal can swallow pointerup, leaving a phantom held touch.
     input.clearTouches();
@@ -178,6 +179,11 @@ function syncSheet() {
   EL.shake0.classList.toggle('sel', s === 0);
   EL.shake1.classList.toggle('sel', s > 0 && s < 0.8);
   EL.shake2.classList.toggle('sel', s >= 0.8);
+  // posture presets are only meaningful while actually steering by tilt
+  EL.poseRow.style.display = input.mode === 'tilt' ? '' : 'none';
+  EL.poseUpright.classList.toggle('sel', input.tiltPreset === 'upright');
+  EL.poseAngled.classList.toggle('sel', input.tiltPreset === 'angled');
+  EL.poseFlat.classList.toggle('sel', input.tiltPreset === 'flat');
 }
 let hapticsOn = true;
 try { hapticsOn = localStorage.getItem('tank.haptics') !== '0'; } catch { /* private mode */ }
@@ -198,6 +204,9 @@ function wireUi() {
     try { localStorage.setItem('tank.haptics', hapticsOn ? '1' : '0'); } catch { /* ignore */ }
     syncSheet();
   });
+  EL.poseUpright.addEventListener('click', () => { input.applyTiltPreset('upright'); syncSheet(); });
+  EL.poseAngled.addEventListener('click', () => { input.applyTiltPreset('angled'); syncSheet(); });
+  EL.poseFlat.addEventListener('click', () => { input.applyTiltPreset('flat'); syncSheet(); });
   EL.shake0.addEventListener('click', () => { setShakeScale(0); syncSheet(); });
   EL.shake1.addEventListener('click', () => { setShakeScale(0.5); syncSheet(); });
   EL.shake2.addEventListener('click', () => { setShakeScale(1); syncSheet(); });
@@ -214,7 +223,9 @@ function wireUi() {
 // single most disorienting thing about this game. Shown once, recallable from
 // settings. The match runs underneath — this never blocks or pauses anyone else.
 function showIntro() {
-  EL.introDrive.textContent = input.mode === 'tilt'
+  // On a phone tilt is the default, but permission is not granted until the first
+  // touch — so key the copy off the PREFERENCE, not the mode we're in right now.
+  EL.introDrive.textContent = (input.mode === 'tilt' || (input.prefersTilt && input.isTouch))
     ? 'Tilt your phone to drive.'
     : 'Drag the left side to drive.';
   EL.intro.classList.add('on');
@@ -362,7 +373,7 @@ function startNet(resolveUrl) {
       const o = take(); bi++;
       o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
       o.mine = b.owner === game.myId;
-      o.key = bid; o.isNonce = false; o.prevX = b.x; o.prevY = b.y;
+      o.key = bid; o.isNonce = false; o.prevX = b.x; o.prevY = b.y; o.owner = b.owner;
       bullets.push(o);
     }
     for (const nonce of game.predicted.keys()) {
@@ -370,7 +381,7 @@ function startNet(resolveUrl) {
       const o = take(); bi++;
       o.x = b.x + b.vx * acc; o.y = b.y + b.vy * acc; o.vx = b.vx; o.vy = b.vy;
       o.mine = true;
-      o.key = nonce; o.isNonce = true; o.prevX = b.x; o.prevY = b.y;
+      o.key = nonce; o.isNonce = true; o.prevX = b.x; o.prevY = b.y; o.owner = game.myId;
       bullets.push(o);
     }
 
@@ -390,19 +401,25 @@ function startNet(resolveUrl) {
     drawState.towerHp = game.towerHp;
     drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
 
-    // Resolve MY shells against exactly the tanks being drawn this frame, so an
+    // Resolve EVERY shell against exactly the tanks being drawn this frame, so an
     // impact lands the instant it connects on screen instead of a round trip
     // later. Swept (previous->current) so a fast shell can't skip a target.
+    // Incoming fire matters as much as outgoing: a shell that visibly passed
+    // through you and only docked health a moment later was the worst offender.
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
-      if (!b.mine) continue;
+      let hit = null;
       for (const t of drawState.others) {
-        if (!t.alive) continue;
-        if (segPointDist(b.prevX, b.prevY, b.x, b.y, t.x, t.y) >= HIT_RADIUS) continue;
-        game.predictHit(b.key, b.isNonce, b.x, b.y, t.id);
-        bullets.splice(i, 1);
-        break;
+        if (!t.alive || t.id === b.owner) continue;
+        if (segPointDist(b.prevX, b.prevY, b.x, b.y, t.x, t.y) < HIT_RADIUS) { hit = t; break; }
       }
+      if (!hit && !b.mine && game.me && game.meServer && game.meServer.alive
+          && segPointDist(b.prevX, b.prevY, b.x, b.y, mePos.x, mePos.y) < HIT_RADIUS) {
+        hit = { id: game.myId, hp: game.meServer.hp };
+      }
+      if (!hit) continue;
+      game.predictHit(b.key, b.isNonce, b.x, b.y, hit.id, hit.hp);
+      bullets.splice(i, 1);
     }
     drawState.effects = game.effects;
     drawState.joy = input.joy;
@@ -410,6 +427,8 @@ function startNet(resolveUrl) {
     drawState.dt = dt || 1 / 60;
     drawState.lastFireAt = game.lastFireAt;
     drawState.reload = game.reloadFraction();
+    drawState.ammo = game.ammo;
+    drawState.reloading = game.reloading();
     drawState.showAim = input.hasAim;
     renderer.draw(drawState);
 

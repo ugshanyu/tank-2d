@@ -21,17 +21,17 @@ export const BOT_PROFILES = [
   {
     key: 'rush', name: 'Blitz',
     role: 'Drives at the enemy tower and sieges it, trading lives for damage.',
-    aimError: 0.10, engageRange: 430, standoff: 300, strafe: 0.35, speed: 1,
+    aimError: 0.045, engageRange: 520, standoff: 300, strafe: 0.5, speed: 1,
   },
   {
     key: 'hunt', name: 'Stalker',
     role: 'Hunts the nearest enemy tank and duels it at mid range.',
-    aimError: 0.055, engageRange: 540, standoff: 230, strafe: 0.8, speed: 1,
+    aimError: 0.028, engageRange: 640, standoff: 240, strafe: 0.95, speed: 1,
   },
   {
     key: 'guard', name: 'Bulwark',
     role: 'Orbits its own tower and intercepts anything that comes for it.',
-    aimError: 0.13, engageRange: 460, standoff: 210, strafe: 0.45, speed: 0.88,
+    aimError: 0.06, engageRange: 560, standoff: 220, strafe: 0.6, speed: 0.94,
   },
 ];
 
@@ -98,6 +98,92 @@ function losClear(x1, y1, x2, y2, skipTower = -1) {
   return true;
 }
 
+// ---------------------------------------------------------------- pathing --
+// A steering fan alone cannot navigate this map: measured over a real match it
+// left bots with line of sight to ANYTHING only 2.4% of ticks, and after ~6 s
+// they wedged against geometry and stopped fighting altogether. The arena is
+// small and static, so a fixed waypoint graph is both cheaper and far better
+// behaved than any amount of local avoidance.
+//
+// Nodes sit in the two clear lanes, in the gaps between the cross-bars and the
+// centre block, and on the approach to each tower.
+const NODES = [
+  { x: 200, y: 180 }, { x: 200, y: 430 }, { x: 200, y: 640 }, { x: 200, y: 850 }, { x: 200, y: 1100 },
+  { x: 520, y: 180 }, { x: 520, y: 430 }, { x: 520, y: 640 }, { x: 520, y: 850 }, { x: 520, y: 1100 },
+  { x: 360, y: 230 }, { x: 360, y: 500 }, { x: 360, y: 780 }, { x: 360, y: 1050 },
+];
+
+// Can a TANK travel this segment without clipping anything?
+function laneClear(x1, y1, x2, y2) {
+  const d = Math.hypot(x2 - x1, y2 - y1);
+  const steps = Math.max(2, Math.ceil(d / 18));
+  for (let i = 0; i <= steps; i++) {
+    const f = i / steps;
+    if (blockedForTank(x1 + (x2 - x1) * f, y1 + (y2 - y1) * f)) return false;
+  }
+  return true;
+}
+
+// Adjacency, built once at module load.
+const ADJ = NODES.map((a, i) => {
+  const out = [];
+  for (let j = 0; j < NODES.length; j++) {
+    if (i === j) continue;
+    const b = NODES[j];
+    if (Math.hypot(b.x - a.x, b.y - a.y) > 470) continue;
+    if (laneClear(a.x, a.y, b.x, b.y)) out.push(j);
+  }
+  return out;
+});
+
+function nearestNode(x, y, mustSee) {
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < NODES.length; i++) {
+    const d = Math.hypot(NODES[i].x - x, NODES[i].y - y);
+    if (d >= bestD) continue;
+    if (mustSee && !laneClear(x, y, NODES[i].x, NODES[i].y)) continue;
+    bestD = d; best = i;
+  }
+  return best;
+}
+
+// Breadth-first hop from the node nearest us to the node nearest the goal.
+// The graph is 14 nodes; this is trivial to run per bot per tick, but we only
+// recompute when the goal moves meaningfully (see navigate()).
+const _prev = new Int8Array(NODES.length);
+function firstHop(from, to) {
+  if (from < 0 || to < 0) return -1;
+  if (from === to) return to;
+  _prev.fill(-1);
+  const q = [from];
+  _prev[from] = from;
+  for (let h = 0; h < q.length; h++) {
+    const cur = q[h];
+    for (const nx of ADJ[cur]) {
+      if (_prev[nx] !== -1) continue;
+      _prev[nx] = cur;
+      if (nx === to) {
+        let n = to;
+        while (_prev[n] !== from && _prev[n] !== n) n = _prev[n];
+        return n;
+      }
+      q.push(nx);
+    }
+  }
+  return -1;
+}
+
+// Where should this bot actually drive right now? Straight at the goal when it
+// can, otherwise via the graph.
+function navigate(me, goalX, goalY) {
+  if (laneClear(me.x, me.y, goalX, goalY)) return { x: goalX, y: goalY };
+  const from = nearestNode(me.x, me.y, true) >= 0 ? nearestNode(me.x, me.y, true) : nearestNode(me.x, me.y, false);
+  const to = nearestNode(goalX, goalY, false);
+  const hop = firstHop(from, to);
+  if (hop < 0) return { x: goalX, y: goalY };
+  return NODES[hop];
+}
+
 // Steer toward (tx,ty), fanning out from the direct heading until a probe point
 // is walkable. Cheap, has no map graph to maintain, and the fan is wide enough
 // (out to ±150°) that a tank can back out of the dead ends this map has.
@@ -110,15 +196,22 @@ function steer(tank, tx, ty, bias) {
     if (blockedForTank(tank.x + Math.cos(a) * probe, tank.y + Math.sin(a) * probe)) continue;
     return { x: Math.cos(a), y: Math.sin(a) };
   }
-  return { x: 0, y: 0 };
+  // Never return "don't move". A bot that stops is a bot that never finds a fight
+  // again; drive at the goal and let collision resolution slide us along the wall.
+  return { x: Math.cos(base), y: Math.sin(base) };
 }
 
 // Aim with travel-time lead, plus a per-profile error so bots miss like people.
+// The lead is solved iteratively: a single pass under-leads badly now that shells
+// move at 1750 px/s and the intercept point is well ahead of the naive estimate.
 function aimAt(from, target, profile) {
-  const d = Math.hypot(target.x - from.x, target.y - from.y);
-  const t = d / BULLET_SPEED;
-  const px = target.x + (target.vx || 0) * t;
-  const py = target.y + (target.vy || 0) * t;
+  let t = Math.hypot(target.x - from.x, target.y - from.y) / BULLET_SPEED;
+  let px = target.x, py = target.y;
+  for (let i = 0; i < 3; i++) {
+    px = target.x + (target.vx || 0) * t;
+    py = target.y + (target.vy || 0) * t;
+    t = Math.hypot(px - from.x, py - from.y) / BULLET_SPEED;
+  }
   return Math.atan2(py - from.y, px - from.x) + (Math.random() - 0.5) * 2 * profile.aimError;
 }
 
@@ -167,8 +260,10 @@ export function botInput(room, bot, tick) {
     && losClear(me.x, me.y, near.player.tank.x, near.player.tank.y);
 
   const towerDist = Math.hypot(enemyTower.x - me.x, enemyTower.y - me.y);
+  // Shells now reach far further than the old 620px gate, which was the main
+  // reason bots stood around not shooting the objective.
   const canHitTower = enemyTowerAlive
-    && towerDist < 620
+    && towerDist < 900
     && losClear(me.x, me.y, enemyTower.x, enemyTower.y, enemyTowerIdx);
 
   // Blitz prioritises the objective; the other two prioritise whoever is shooting at them.
@@ -200,8 +295,12 @@ export function botInput(room, bot, tick) {
   // ---- where am I going? ----
   let goal;
   if (prof.key === 'guard') {
-    // hold the tower; only break the leash for something already inside it
-    const intruder = near && Math.hypot(near.player.tank.x - ownTower.x, near.player.tank.y - ownTower.y) < GUARD_LEASH
+    // Hold the tower, but chase anything within the leash OR anything we can
+    // already shoot. The old version only reacted to enemies near its own tower,
+    // so it spent whole matches orbiting an empty base doing nothing.
+    const intruder = near
+      && (Math.hypot(near.player.tank.x - ownTower.x, near.player.tank.y - ownTower.y) < GUARD_LEASH
+          || near.dist < prof.engageRange)
       ? near.player.tank : null;
     if (intruder) {
       goal = { x: intruder.x, y: intruder.y };
@@ -219,7 +318,10 @@ export function botInput(room, bot, tick) {
   }
 
   const goalDist = Math.hypot(goal.x - me.x, goal.y - me.y);
-  const dir = steer(me, goal.x, goal.y, ai.evadeUntil > tick ? ai.evadeDir : 1);
+  // Route around the map instead of grinding into it. The steering fan still
+  // handles the last few metres and anything dynamic.
+  const via = navigate(me, goal.x, goal.y);
+  const dir = steer(me, via.x, via.y, ai.evadeUntil > tick ? ai.evadeDir : 1);
   let mx = dir.x, my = dir.y;
 
   // Back off once we're at our preferred range, and strafe so we're not a

@@ -12,7 +12,7 @@
 
 import {
   DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
-  RESPAWN_DELAY, wrapAngle, encAngle16, decAngle16,
+  RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, wrapAngle, encAngle16, decAngle16,
 } from '../shared/protocol.js';
 import { stepTank, stepBullet } from '../shared/sim.js';
 
@@ -47,6 +47,9 @@ export class Game {
     this.fireNonce = 0;
     this.lastFireSeq = -1000;
     this._nextFireAtMs = 0;
+    this._localAmmo = MAG_SIZE;
+    this._localAmmoAt = -1e9;
+    this._reloadUntil = 0;
     this.lastFireAt = -1e9;
     this.killedBy = '';
     this.errX = 0; this.errY = 0; // visual smoothing offset after corrections
@@ -73,6 +76,7 @@ export class Game {
     // the impact. See predictHit().
     this._hitBids = new Set();
     this._hitNonces = new Set();
+    this._predDmg = new Map();     // id -> {hp, at} predicted health, see displayHp()
 
     // impulses the renderer/audio layer drains each frame
     this.shake = 0;               // screen-shake magnitude request, px
@@ -128,8 +132,19 @@ export class Game {
   // Wall clock, not seq counting. `dSeq * DT` coupled the fire rate to the frame
   // rate: any frame that skipped a tick stretched the cooldown in real time.
   _cooldownReady() {
+    if (this.ammo <= 0 || this.reloading()) return false;
     return performance.now() >= this._nextFireAtMs;
   }
+
+  // Rounds left — authoritative from the snapshot, predicted locally between
+  // snapshots so the pips drop on the frame you pull the trigger.
+  get ammo() {
+    const server = this.meServer ? this.meServer.ammo : MAG_SIZE;
+    if (performance.now() - this._localAmmoAt < 400) return Math.min(server, this._localAmmo);
+    return server;
+  }
+
+  reloading() { return this._reloadUntil > performance.now(); }
 
   // INSTANT HITS. The server is still the authority on damage, but waiting for its
   // `bx` echo meant the impact — flash, sound, shake — landed a full round trip
@@ -139,7 +154,7 @@ export class Game {
   // show the impact immediately and let the echo be a silent confirmation.
   //
   // `key` is the bullet's bid if confirmed, or its fire nonce if still predicted.
-  predictHit(key, isNonce, x, y, victimId) {
+  predictHit(key, isNonce, x, y, victimId, serverHp) {
     if (isNonce) {
       if (this._hitNonces.has(key)) return;
       this._hitNonces.add(key);
@@ -150,8 +165,31 @@ export class Game {
       this.bullets.delete(key);
     }
     this.effects.push({ kind: 'hit', x, y, born: performance.now(), dur: 450 });
-    this.shake = Math.max(this.shake, 3);
-    this.events.push({ kind: 'hit', key: victimId, x });
+    this.predictDamage(victimId, serverHp);
+    const mine = victimId === this.myId;
+    this.shake = Math.max(this.shake, mine ? 7 : 3);
+    this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x });
+  }
+
+  // Drop the health bar the moment the shell connects. Server HP arrives a round
+  // trip later, so without this the shell visibly landed and the bar sat still.
+  predictDamage(id, serverHp) {
+    const now = performance.now();
+    const prev = this._predDmg.get(id);
+    const base = prev && now - prev.at < 600 ? prev.hp : serverHp;
+    this._predDmg.set(id, { hp: Math.max(0, base - BULLET_DAMAGE), at: now });
+  }
+
+  // Authoritative HP wins as soon as it catches up, and a prediction the server
+  // never confirms (a graze we called a hit) expires instead of sticking.
+  displayHp(id, serverHp) {
+    const e = this._predDmg.get(id);
+    if (!e) return serverHp;
+    if (performance.now() - e.at > 600 || serverHp <= e.hp) {
+      this._predDmg.delete(id);
+      return serverHp;
+    }
+    return e.hp;
   }
 
   // Ids are recycled aggressively (lowest free 1..4, and a bot refills a vacated
@@ -171,14 +209,26 @@ export class Game {
   }
 
   // 0..1 for the reload arc drawn around your own tank
+  // 0..1 progress of whatever gate is currently blocking the trigger
   reloadFraction() {
-    const left = this._nextFireAtMs - performance.now();
+    const now = performance.now();
+    if (this._reloadUntil > now) {
+      return Math.max(0, 1 - (this._reloadUntil - now) / (RELOAD_TIME * 1000));
+    }
+    const left = this._nextFireAtMs - now;
     if (left <= 0) return 1;
     return Math.max(0, 1 - left / (FIRE_COOLDOWN * 1000));
   }
 
   _spawnPredicted(nonce, a) {
-    this._nextFireAtMs = performance.now() + FIRE_COOLDOWN * 1000;
+    const now = performance.now();
+    this._nextFireAtMs = now + FIRE_COOLDOWN * 1000;
+    this._localAmmo = Math.max(0, this.ammo - 1);
+    this._localAmmoAt = now;
+    if (this._localAmmo === 0) {
+      this._reloadUntil = now + RELOAD_TIME * 1000;
+      this.events.push({ kind: 'reload' });
+    }
     // Spawn from where the barrel is DRAWN (err offset included), otherwise the
     // shell and muzzle flash detach from the tank during any correction.
     const x = this.me.x + this.errX + Math.cos(a) * MUZZLE_OFFSET;
@@ -534,7 +584,8 @@ export class Game {
       st.x = x + st.errX; st.y = y + st.errY;
       st.vx = b.vx; st.vy = b.vy;
       st.hull = hull; st.turret = turret;
-      st.hp = b.hp; st.alive = b.alive; st.score = b.score; st.team = b.team;
+      st.hp = this.displayHp(id, b.hp);
+      st.alive = b.alive; st.score = b.score; st.team = b.team;
       st.name = this.names.get(id) || '?';
       out.push(st);
     }

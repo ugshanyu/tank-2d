@@ -27,17 +27,20 @@ export const MAX_HP = 100;
 // reading as a SHOT and starts reading as a slow object you steer around. 900 px/s
 // crosses the arena in 1.4 s and lands like a gun. Damage drops so faster shells
 // don't halve time-to-kill: 4 hits instead of 3.
-export const BULLET_SPEED = 1150;       // px/s (~5.6x tank speed) — a shell should
-                                        // read as a SHOT, arriving almost as fast as
-                                        // you can register having fired it
+export const BULLET_SPEED = 1750;       // px/s (~8.5x tank speed) — a shell should
+                                        // read as a SHOT: near-instant to where you
+                                        // pointed, not an object you steer around
 export const BULLET_RADIUS = 5;
-export const BULLET_TTL = 1.6;          // seconds (must outlast a cross-arena shot + bounce)
+export const BULLET_TTL = 1.2;          // seconds (2100px of travel: a cross-arena
+                                        // shot plus a bounce, with margin)
 export const BULLET_MAX_BOUNCES = 1;    // dies on 2nd wall contact
 export const BULLET_DAMAGE = 28;        // 4 shells to kill
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
-export const FIRE_COOLDOWN = 0.20;      // s between shots (server-enforced) — 5/s.
-                                        // 0.33 left a third of a second of dead
-                                        // trigger, which reads as unresponsive.
+export const FIRE_COOLDOWN = 0.16;      // s between shots inside a magazine (~6/s)
+// Magazine: five fast shots, then a real reload. The pause is what gives the
+// volley a shape — without it, held fire is an undifferentiated stream.
+export const MAG_SIZE = 5;
+export const RELOAD_TIME = 1.25;        // s to refill an empty magazine
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
 export const RESPAWN_DELAY = 2.5;       // seconds
@@ -54,9 +57,9 @@ export const FRIENDLY_FIRE = true;      // shells damage teammates and your own 
 // Tower fire is server-authoritative and event-sourced exactly like tank fire —
 // clients replay the 'fire' event, they never predict tower AI.
 export const TOWER_RADIUS = 44;
-export const TOWER_HP = 320;            // ~11 shells. Measured pace put a match at
-                                        // 2-3 min at 400 HP, which is a slog on
-                                        // mobile; this targets ~90 s.
+export const TOWER_HP = 560;            // 20 shells. Once bots could actually path
+                                        // to the objective, 320 HP produced 30 s
+                                        // matches; measured pace puts this at ~60 s.
 export const TOWER_RANGE = 330;         // px; enemies must commit to get in range
 export const TOWER_FIRE_COOLDOWN = 1.1; // s between tower shots
 export const TOWER_MUZZLE_OFFSET = 58;  // > TOWER_RADIUS + BULLET_RADIUS so a shell
@@ -155,8 +158,9 @@ export function decodePong(v) {
 //         (13 bytes)
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
-// flags: bit0 = alive, bit1 = team. Team rides in the spare flag bit rather than
-// its own byte, so adding teams cost 0 bytes per tank on the 60 Hz hot path.
+// flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7). All three ride in the
+// spare bits of one byte, so teams and ammo cost 0 extra bytes per tank on the
+// 60 Hz hot path — and ammo stays authoritative rather than client-guessed.
 const TANK_BYTES = 14;
 const SNAP_HEADER = 13;
 export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
@@ -179,7 +183,7 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
     v.setUint8(o + 9, encAngle8(t.hull));
     v.setUint8(o + 10, encAngle8(t.turret));
     v.setUint8(o + 11, Math.max(0, Math.min(255, t.hp)));
-    v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1));
+    v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1) | ((Math.min(7, t.ammo ?? MAG_SIZE) & 7) << 2));
     v.setUint8(o + 13, Math.min(255, t.score));
     o += TANK_BYTES;
   }
@@ -205,6 +209,7 @@ export function decodeSnapshot(v /* DataView */) {
       hp: v.getUint8(o + 11),
       alive: (v.getUint8(o + 12) & 1) !== 0,
       team: (v.getUint8(o + 12) >> 1) & 1,
+      ammo: (v.getUint8(o + 12) >> 2) & 7,
       score: v.getUint8(o + 13),
     });
     o += TANK_BYTES;

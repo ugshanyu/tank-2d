@@ -14,7 +14,7 @@ import {
   BULLET_DAMAGE, FIRE_COOLDOWN, OWNER_GRACE, MUZZLE_OFFSET, RESPAWN_DELAY,
   MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
-  MAX_LAG_TICKS, decodeInput, encodeSnapshot, encodePong,
+  MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
@@ -83,7 +83,7 @@ function addBot(room) {
     isBot: true, profile,
     tank: makeTank(id, s.x, s.y, team),
     inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
-    nextFireAt: -10, respawnAt: 0,
+    nextFireAt: -10, respawnAt: 0, reloadAt: 0,
     hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
     ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1 },
   };
@@ -241,11 +241,22 @@ function stepRoom(room) {
     if (!p.tank.alive && p.respawnAt !== 0 && tick >= p.respawnAt) {
       const s = pickSpawn(room, p.tank.team);
       const t = p.tank;
-      t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true;
-      p.respawnAt = 0;
+      t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.ammo = MAG_SIZE;
+      p.respawnAt = 0; p.reloadAt = 0;
       resetHistory(p, s.x, s.y);
       p.inputQueue.length = 0; // stale pre-death inputs must not move the fresh tank
       room.broadcastJson({ t: 'spawn', id: p.id, x: s.x, y: s.y });
+    }
+  }
+
+  // 3b. reloads
+  {
+    const now = tick * DT;
+    for (const p of room.players.values()) {
+      if (p.reloadAt !== 0 && now >= p.reloadAt) {
+        p.tank.ammo = MAG_SIZE;
+        p.reloadAt = 0;
+      }
     }
   }
 
@@ -341,8 +352,8 @@ function startMatch(room) {
   for (const p of room.players.values()) {
     const s = pickSpawn(room, p.tank.team);
     const t = p.tank;
-    t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.score = 0;
-    p.respawnAt = 0; p.nextFireAt = -10;
+    t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.score = 0; t.ammo = MAG_SIZE;
+    p.respawnAt = 0; p.nextFireAt = -10; p.reloadAt = 0;
     resetHistory(p, s.x, s.y);
     p.inputQueue.length = 0;
   }
@@ -355,6 +366,13 @@ function tryFire(room, p, inp) {
   // capping the sustained rate at exactly 1/FIRE_COOLDOWN (anti-cheat bound).
   const now = tick * DT;
   if (now < p.nextFireAt - 1e-6) return;
+  // Magazine. Empty starts a reload; nothing fires until it completes.
+  if (p.tank.ammo <= 0) {
+    if (p.reloadAt === 0) p.reloadAt = now + RELOAD_TIME;
+    return;
+  }
+  p.tank.ammo -= 1;
+  if (p.tank.ammo === 0) p.reloadAt = now + RELOAD_TIME;
   p.nextFireAt = Math.max(p.nextFireAt, now - FIRE_COOLDOWN) + FIRE_COOLDOWN;
   const a = inp.aim;
   const x = p.tank.x + Math.cos(a) * MUZZLE_OFFSET;
@@ -530,7 +548,7 @@ wss.on('connection', (ws, req) => {
           id, userId: auth.sub, name, ws,
           tank: makeTank(id, s.x, s.y, team),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
-          nextFireAt: -10, respawnAt: 0,
+          nextFireAt: -10, respawnAt: 0, reloadAt: 0,
           hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
         };
         room.players.set(id, player);

@@ -5,7 +5,10 @@
 // Browsers only allow an AudioContext to start from a user gesture, so this is
 // unlocked from the same first touch that requests motion permission.
 
+import { RELOAD_TIME } from '../shared/protocol.js';
+
 const MASTER_GAIN = 0.35;
+const RELOAD_CLACK = Math.max(0.1, RELOAD_TIME - 0.12);   // magazine seats at the end
 const MIN_GAP_MS = 28;        // rate limit per EMITTER, not per kind — see _gate
 
 export class Sfx {
@@ -150,6 +153,11 @@ export class Sfx {
         this._noise({ dur: 0.7, gain: 0.62, freq: 700 });
         this._tone({ type: 'triangle', f0: 300, f1: 90, dur: 0.62, gain: 0.5 });
         this._tone({ type: 'square', f0: 190, f1: 70, dur: 0.5, gain: 0.16 });
+        break;
+      case 'reload':
+        this._noise({ dur: 0.05, gain: 0.16, type: 'bandpass', freq: 1700, q: 8 });
+        this._tone({ type: 'square', f0: 150, f1: 110, dur: 0.07, gain: 0.10, delay: 0.02 });
+        this._noise({ dur: 0.06, gain: 0.2, type: 'bandpass', freq: 2400, q: 9, delay: RELOAD_CLACK });
         break;
       case 'spawn':
         this._tone({ type: 'triangle', f0: 300, f1: 900, dur: 0.18, gain: 0.22, attack: 0.02 });
