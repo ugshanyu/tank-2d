@@ -168,6 +168,44 @@ async function checkInstantHits() {
   g.bullets.set(56, { x: 5, y: 5, vx: 0, vy: 0, age: 0, bounces: 0, owner: 2, bornMs: 0, simMs: 0 });
   g.onEvent({ t: 'bx', bid: 56, x: 5, y: 5, hit: 1, tower: -1 });
   check(g.effects.length === before + 1, 'server-only impacts still play');
+
+  // ---- predicted damage: the health bar must move on impact ----
+  const g2 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g2.myId = 1;
+  check(g2.displayHp(2, 100) === 100, 'undamaged tank shows server hp');
+  g2.predictDamage(2, 100);
+  check(g2.displayHp(2, 100) === 100 - BULLET_DAMAGE, 'health drops immediately on a predicted hit');
+  // authoritative HP wins the moment it catches up
+  check(g2.displayHp(2, 100 - BULLET_DAMAGE) === 100 - BULLET_DAMAGE, 'server hp takes over when it lands');
+  check(g2.displayHp(2, 100) === 100, 'prediction released once confirmed');
+
+  // a run of mispredictions must NOT walk a bar to zero
+  for (let i = 0; i < 10; i++) g2.predictDamage(3, 100);
+  const floor = g2.displayHp(3, 100);
+  check(floor >= 100 - BULLET_DAMAGE * 2, `unconfirmed predictions capped (bar at ${floor}, not 0)`);
+
+  // ---- taking a hit must not double-fire the hurt feedback ----
+  const g3 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g3.myId = 1;
+  g3.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 0 };
+  g3.lastHp = 100;
+  g3.me = { x: 0, y: 0, vx: 0, vy: 0, hull: 0 };
+  g3.predictHit(9, false, 0, 0, 1, 100);       // shell hits ME, predicted locally
+  const hurtAfterPredict = g3.events.filter((e) => e.kind === 'hurt').length;
+  g3._reconcile({ hp: 100 - BULLET_DAMAGE, alive: true, x: 0, y: 0, vx: 0, vy: 0, hull: 0 }, 0);
+  const hurtAfterServer = g3.events.filter((e) => e.kind === 'hurt').length;
+  check(hurtAfterPredict === 1, 'taking a hit fires hurt feedback once, immediately');
+  check(hurtAfterServer === 1, 'server confirmation does NOT replay the hurt feedback');
+
+  // ---- a wrong-victim prediction must not swallow the real event ----
+  const g4 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  g4.myId = 1;
+  g4.bullets.set(70, { x: 0, y: 0, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1, bornMs: 0, simMs: 0 });
+  g4.predictHit(70, false, 0, 0, 2, 100);      // we guessed it hit tank 2
+  const fx = g4.effects.length;
+  g4.onEvent({ t: 'bx', bid: 70, x: 0, y: 0, hit: 0, tower: 1 });  // it actually hit a TOWER
+  check(g4.effects.length > fx, 'a mispredicted shell still plays the real impact');
+  check(g4.events.some((e) => e.kind === 'towerhit'), 'tower damage is never silent after a misprediction');
 }
 
 async function main() {

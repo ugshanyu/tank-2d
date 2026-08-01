@@ -6,7 +6,7 @@
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
 import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
-  TANK_RADIUS, BULLET_RADIUS,
+  TANK_RADIUS, BULLET_RADIUS, MAX_HP, OWNER_GRACE,
 } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
@@ -373,7 +373,8 @@ function startNet(resolveUrl) {
       const o = take(); bi++;
       o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
       o.mine = b.owner === game.myId;
-      o.key = bid; o.isNonce = false; o.prevX = b.x; o.prevY = b.y; o.owner = b.owner;
+      o.key = bid; o.isNonce = false; o.owner = b.owner;
+      o.prevX = b.frameX ?? b.x; o.prevY = b.frameY ?? b.y;
       bullets.push(o);
     }
     for (const nonce of game.predicted.keys()) {
@@ -389,10 +390,15 @@ function startNet(resolveUrl) {
       mePos.x = game.me.x + game.errX + game.me.vx * acc;
       mePos.y = game.me.y + game.errY + game.me.vy * acc;
       mePos.hull = game.me.hull;
+      game.recordSelf(net.serverNowMs(), mePos.x, mePos.y);
     }
     if (game.shake > 0) { renderer.addShake(game.shake); game.shake = 0; }
 
     drawState.me = game.meServer;
+    // Your OWN bar has to go through the prediction layer too. It was reading raw
+    // server HP, so the one health bar that matters most still lagged a round trip
+    // behind the impact — exactly the symptom the prediction was added to fix.
+    drawState.myHp = game.meServer ? game.displayHp(game.myId, game.meServer.hp) : MAX_HP;
     drawState.meId = game.myId;
     drawState.meName = game.names.get(game.myId) || me.userName || '';
     drawState.mePos = game.me ? mePos : null;
@@ -413,9 +419,14 @@ function startNet(resolveUrl) {
         if (!t.alive || t.id === b.owner) continue;
         if (segPointDist(b.prevX, b.prevY, b.x, b.y, t.x, t.y) < HIT_RADIUS) { hit = t; break; }
       }
-      if (!hit && !b.mine && game.me && game.meServer && game.meServer.alive
-          && segPointDist(b.prevX, b.prevY, b.x, b.y, mePos.x, mePos.y) < HIT_RADIUS) {
-        hit = { id: game.myId, hp: game.meServer.hp };
+      // Incoming fire is tested against where WE were on the same interpolated
+      // timeline the shell is drawn on, not against our predicted present.
+      if (!hit && game.meServer && game.meServer.alive
+          && (!b.mine || b.age > OWNER_GRACE)) {
+        const past = game.meAt(renderMs);
+        if (past && segPointDist(b.prevX, b.prevY, b.x, b.y, past.x, past.y) < HIT_RADIUS) {
+          hit = { id: game.myId, hp: game.meServer.hp };
+        }
       }
       if (!hit) continue;
       game.predictHit(b.key, b.isNonce, b.x, b.y, hit.id, hit.hp);

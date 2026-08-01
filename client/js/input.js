@@ -33,7 +33,12 @@ export class Input {
     try {
       const stored = localStorage.getItem('tank.tilt');
       if (stored !== null) this.prefersTilt = stored === '1';
-      this.tiltPreset = localStorage.getItem('tank.tiltPose') || 'upright';
+      const pose = localStorage.getItem('tank.tiltPose');
+      // A stored 'custom' is only meaningful with the angle that went with it;
+      // without one, applyTiltPreset would fail and we'd fall back to sampling.
+      this._customBeta = Number(localStorage.getItem('tank.tiltBeta'));
+      this.tiltPreset = (pose === 'custom' && Number.isFinite(this._customBeta)) ? 'custom'
+        : (TILT_PRESETS[pose] !== undefined ? pose : 'upright');
     } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
@@ -111,7 +116,11 @@ export class Input {
     this.joy = null;
     this.moveX = 0; this.moveY = 0;
     try { localStorage.setItem('tank.tilt', this.prefersTilt ? '1' : '0'); } catch { /* ignore */ }
-    if (mode === 'tilt') this.calibrate();
+    // Re-apply the chosen POSTURE, never re-sample the current pose. calibrate()
+    // here was clobbering the preset the caller had just set — and on iOS the
+    // sample was taken while the player was still tapping the permission dialog,
+    // which is the precise failure this whole preset system exists to avoid.
+    if (mode === 'tilt' && this.tiltPreset !== 'custom') this.applyTiltPreset(this.tiltPreset);
     return true;
   }
 
@@ -126,8 +135,14 @@ export class Input {
   // One of three postures. Cheaper for the player than "hold still and tap" and
   // it survives them shifting position, which auto-calibration does not.
   applyTiltPreset(name) {
+    if (name === 'custom' && Number.isFinite(this._customBeta)) {
+      this.tiltPreset = 'custom';
+      this._beta0 = this._customBeta;
+      this._gamma0 = this._customGamma || 0;
+      return true;
+    }
     const beta = TILT_PRESETS[name];
-    if (beta === undefined) return false;
+    if (beta === undefined) return this.applyTiltPreset('upright');
     this.tiltPreset = name;
     this._beta0 = beta;
     this._gamma0 = 0;
@@ -140,8 +155,13 @@ export class Input {
     if (this._beta !== null) {
       this._beta0 = this._sBeta ?? this._beta;
       this._gamma0 = this._sGamma ?? this._gamma;
+      this._customBeta = this._beta0;
+      this._customGamma = this._gamma0;
       this.tiltPreset = 'custom';
-      try { localStorage.setItem('tank.tiltPose', 'custom'); } catch { /* ignore */ }
+      try {
+        localStorage.setItem('tank.tiltPose', 'custom');
+        localStorage.setItem('tank.tiltBeta', String(this._beta0));
+      } catch { /* ignore */ }
     }
   }
 

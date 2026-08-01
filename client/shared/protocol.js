@@ -41,6 +41,9 @@ export const FIRE_COOLDOWN = 0.16;      // s between shots inside a magazine (~6
 // volley a shape — without it, held fire is an undifferentiated stream.
 export const MAG_SIZE = 5;
 export const RELOAD_TIME = 1.25;        // s to refill an empty magazine
+// Ammo ships in 3 bits of the snapshot flags byte. Above 7 a full magazine would
+// wrap to 0 and read as "permanently empty", locking the trigger.
+if (MAG_SIZE > 7) throw new Error('MAG_SIZE must fit in 3 snapshot bits (<= 7)');
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
 export const RESPAWN_DELAY = 2.5;       // seconds

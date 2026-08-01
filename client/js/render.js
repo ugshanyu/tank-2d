@@ -5,12 +5,14 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP,
-  TOWER_RADIUS, TOWER_HP, TOWER_RANGE, MAG_SIZE,
+  TOWER_RADIUS, TOWER_HP, TOWER_RANGE, MAG_SIZE, BULLET_DAMAGE,
 } from '../shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../shared/sim.js';
 
 // Identity is by TEAM, not by player — in a 2v2 objective match you need to read
 // friend-vs-foe at a glance far more than you need to tell teammates apart.
+// Darkening the surround buys contrast against the arena for free.
+const SURROUND = '#05070b';
 const TEAM_COLORS = ['#4fc3f7', '#ff7a5e'];
 export const teamColor = (team) => TEAM_COLORS[team & 1];
 
@@ -53,6 +55,7 @@ export class Renderer {
     this.shakeAng = 0;
     this.bg = null;          // prerendered static arena
     this.rings = new Map();  // team -> prerendered dashed range ring
+    this._initParticles();
     this.resize();
     // iOS fires resize ~10x while the URL bar animates; each one would otherwise
     // reallocate a ~5 MB backing store and re-render the whole static layer.
@@ -98,31 +101,102 @@ export class Renderer {
     const { zoom, x: cx, y: cy } = this.cam;
 
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    g.fillStyle = '#0b0e14';
+    g.fillStyle = SURROUND;
     g.fillRect(0, 0, this.vw, this.vh);
     g.translate(this.vw / 2, this.vh / 2);
     g.scale(zoom, zoom);
     g.translate(-cx, -cy);
 
-    g.fillStyle = '#12161f';
+    // The floor was a flat #12161f against a #0b0e14 surround — 1.07:1, which is
+    // the same colour to the eye. The whole screen read as one dark field with no
+    // discernible playfield. A lit centre falling off to dark walls gives the
+    // arena a shape before a single sprite is drawn.
+    const floor = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 0, ARENA_W / 2, ARENA_H / 2, 780);
+    floor.addColorStop(0, '#33405a');
+    floor.addColorStop(0.55, '#242c3f');
+    floor.addColorStop(1, '#161c29');
+    g.fillStyle = floor;
     g.fillRect(0, 0, ARENA_W, ARENA_H);
-    g.strokeStyle = 'rgba(120,160,220,0.07)';
+
+    // Two grid tiers: the single 0.07-alpha tier was invisible at 0.54 zoom.
+    g.strokeStyle = 'rgba(130,175,235,0.055)';
     g.lineWidth = 1 / zoom;
     g.beginPath();
     for (let x = 0; x <= ARENA_W; x += 80) { g.moveTo(x, 0); g.lineTo(x, ARENA_H); }
     for (let y = 0; y <= ARENA_H; y += 80) { g.moveTo(0, y); g.lineTo(ARENA_W, y); }
     g.stroke();
-    g.strokeStyle = '#2e4a6b';
-    g.lineWidth = 6;
-    g.strokeRect(0, 0, ARENA_W, ARENA_H);
+    g.strokeStyle = 'rgba(130,175,235,0.15)';
+    g.lineWidth = 1.5 / zoom;
+    g.beginPath();
+    for (let x = 0; x <= ARENA_W; x += 160) { g.moveTo(x, 0); g.lineTo(x, ARENA_H); }
+    for (let y = 0; y <= ARENA_H; y += 160) { g.moveTo(0, y); g.lineTo(ARENA_W, y); }
+    g.stroke();
+
+    // Halfway line — the arena is territorial and never said so.
+    g.strokeStyle = 'rgba(255,255,255,0.10)';
+    g.lineWidth = 2 / zoom;
+    g.setLineDash([14, 10]);
+    g.beginPath(); g.moveTo(0, ARENA_H / 2); g.lineTo(ARENA_W, ARENA_H / 2); g.stroke();
+    g.setLineDash([]);
+
+    // Territory decals under each tower, so you can read whose half you are in.
+    for (const tw of TOWERS) {
+      const pal = PALETTE[tw.team & 1];
+      g.fillStyle = rgba(pal.base, 0.055);
+      g.beginPath(); g.arc(tw.x, tw.y, 190, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = rgba(pal.base, 0.20);
+      g.lineWidth = 2 / zoom;
+      g.beginPath(); g.arc(tw.x, tw.y, 190, 0, Math.PI * 2); g.stroke();
+    }
+
     for (const r of OBSTACLES) {
-      g.fillStyle = '#1d2635';
+      // fake top-left key light, consistent across every object in the scene
+      const og = g.createLinearGradient(r.x, r.y, r.x, r.y + r.h);
+      og.addColorStop(0, '#39455c');
+      og.addColorStop(1, '#1b2231');
+      g.fillStyle = og;
       g.fillRect(r.x, r.y, r.w, r.h);
-      g.strokeStyle = '#3b5273';
+      g.strokeStyle = '#4a6187';
       g.lineWidth = 2.5;
       g.strokeRect(r.x, r.y, r.w, r.h);
-      g.fillStyle = 'rgba(90,130,190,0.10)';
-      g.fillRect(r.x, r.y, r.w, 6);
+      g.fillStyle = 'rgba(190,225,255,0.18)';
+      g.fillRect(r.x, r.y, r.w, 3);
+    }
+
+    // Vignette: pulls the eye to the middle and darkens the walls.
+    const vig = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 420, ARENA_W / 2, ARENA_H / 2, 900);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.45)');
+    g.fillStyle = vig;
+    g.fillRect(0, 0, ARENA_W, ARENA_H);
+
+    // Border in three passes, tinted per half so territory reads instantly.
+    g.strokeStyle = 'rgba(79,195,247,0.10)';
+    g.lineWidth = 22;
+    g.strokeRect(0, 0, ARENA_W, ARENA_H);
+    g.strokeStyle = '#3f6da0';
+    g.lineWidth = 5;
+    g.strokeRect(0, 0, ARENA_W, ARENA_H);
+    g.strokeStyle = 'rgba(190,225,255,0.5)';
+    g.lineWidth = 1.5;
+    g.strokeRect(3, 3, ARENA_W - 6, ARENA_H - 6);
+    for (const tw of TOWERS) {
+      const pal = PALETTE[tw.team & 1];
+      const y0 = tw.team === 1 ? 0 : ARENA_H - 380;
+      const eg = g.createLinearGradient(0, tw.team === 1 ? 0 : ARENA_H, 0, tw.team === 1 ? 380 : ARENA_H - 380);
+      eg.addColorStop(0, rgba(pal.base, 0.42));
+      eg.addColorStop(1, rgba(pal.base, 0));
+      g.strokeStyle = eg;
+      g.lineWidth = 5;
+      g.beginPath();
+      g.moveTo(2.5, y0); g.lineTo(2.5, y0 + 380);
+      g.moveTo(ARENA_W - 2.5, y0); g.lineTo(ARENA_W - 2.5, y0 + 380);
+      g.stroke();
+      g.beginPath();
+      const edge = tw.team === 1 ? 2.5 : ARENA_H - 2.5;
+      g.strokeStyle = rgba(pal.base, 0.42);
+      g.moveTo(0, edge); g.lineTo(ARENA_W, edge);
+      g.stroke();
     }
     this.bg = c;
 
@@ -145,6 +219,95 @@ export class Renderer {
       rg.stroke();
       this.rings.set(team, { canvas: rc, r: rp });
     }
+  }
+
+  // ------------------------------------------------------------- particles --
+  // Pooled and preallocated: this runs inside the frame budget, so no allocation.
+  // A kill used to be one expanding orange circle and the tank simply vanished —
+  // the emotional peak of the match had less presence than a UI toast.
+  _initParticles() {
+    this.parts = new Array(320);
+    for (let i = 0; i < this.parts.length; i++) {
+      this.parts[i] = { life: 0, max: 1, x: 0, y: 0, vx: 0, vy: 0, r: 1, drag: 0.9, kind: 0, col: '#fff' };
+    }
+    this.partHead = 0;
+  }
+
+  _spawnPart(x, y, vx, vy, r, life, kind, col, drag) {
+    const p = this.parts[this.partHead];
+    this.partHead = (this.partHead + 1) % this.parts.length;
+    p.x = x; p.y = y; p.vx = vx; p.vy = vy; p.r = r;
+    p.life = life; p.max = life; p.kind = kind; p.col = col; p.drag = drag;
+  }
+
+  // kind 0 = spark (additive line), 1 = debris (rect), 2 = smoke (soft disc)
+  emitExplosion(x, y, color) {
+    for (let i = 0; i < 18; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 320 + Math.random() * 620;
+      this._spawnPart(x, y, Math.cos(a) * s, Math.sin(a) * s,
+        1.6, 0.12 + Math.random() * 0.14, 0, '#ffd88a', 0.09);
+    }
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 120 + Math.random() * 300;
+      this._spawnPart(x, y, Math.cos(a) * s, Math.sin(a) * s,
+        2 + Math.random() * 3, 0.5 + Math.random() * 0.4, 1,
+        Math.random() < 0.5 ? color : '#2a2f38', 0.22);
+    }
+    for (let i = 0; i < 7; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 18 + Math.random() * 34;
+      this._spawnPart(x, y, Math.cos(a) * s, Math.sin(a) * s,
+        9 + Math.random() * 12, 0.9 + Math.random() * 0.5, 2, 'rgba(70,74,84,', 0.6);
+    }
+  }
+
+  emitSparks(x, y, ang, n = 9) {
+    for (let i = 0; i < n; i++) {
+      const a = ang + (Math.random() - 0.5) * 1.2;
+      const s = 260 + Math.random() * 460;
+      this._spawnPart(x, y, Math.cos(a) * s, Math.sin(a) * s,
+        1.4, 0.07 + Math.random() * 0.1, 0, '#ffd88a', 0.08);
+    }
+  }
+
+  _drawParticles(dt) {
+    const { ctx } = this;
+    ctx.save();
+    for (const p of this.parts) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) continue;
+      const k = Math.exp(-dt / p.drag);
+      p.vx *= k; p.vy *= k;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      const f = p.life / p.max;
+      if (p.kind === 0) {
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = p.col;
+        ctx.globalAlpha = f;
+        ctx.lineWidth = p.r;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
+        ctx.stroke();
+      } else if (p.kind === 1) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = Math.min(1, f * 2.2);
+        ctx.fillStyle = p.col;
+        ctx.fillRect(p.x - p.r / 2, p.y - p.r / 2, p.r, p.r);
+      } else {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = `${p.col}${(0.3 * f).toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * (2 - f), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
   }
 
   // Impulse the camera. Directional when an angle is given (recoil), random otherwise.
@@ -184,7 +347,7 @@ export class Renderer {
     // The static layer is stored at DEVICE resolution, so blit it under identity
     // transform. Clear first: a shaken blit leaves a few px uncovered at the edge.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#0b0e14';
+    ctx.fillStyle = SURROUND;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     if (this.bg) ctx.drawImage(this.bg, sx * this.dpr, sy * this.dpr);
 
@@ -212,6 +375,14 @@ export class Renderer {
     // towers (the objective) sit under everything that moves
     for (let i = 0; i < TOWERS.length; i++) this._tower(TOWERS[i], towerHp[i] ?? 0, state.myTeam);
 
+    // Emit particles once per effect, the frame it first appears.
+    for (const e of state.effects) {
+      if (e.emitted) continue;
+      e.emitted = true;
+      if (e.kind === 'explosion') this.emitExplosion(e.x, e.y, PALETTE[(e.team ?? 0) & 1].base);
+      else if (e.kind === 'hit') this.emitSparks(e.x, e.y, e.a ?? Math.random() * Math.PI * 2);
+      else if (e.kind === 'poof') this.emitSparks(e.x, e.y, e.a ?? Math.random() * Math.PI * 2, 5);
+    }
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
@@ -244,7 +415,7 @@ export class Renderer {
       const recoil = sinceFire < 120 ? 7 * (1 - sinceFire / 120) : 0;
       this._tank(
         state.mePos.x, state.mePos.y, state.mePos.hull, state.aimAngle,
-        state.myTeam, state.meName, state.me.hp ?? MAX_HP, true, recoil, state.reload ?? 1,
+        state.myTeam, state.meName, state.myHp ?? state.me.hp ?? MAX_HP, true, recoil, state.reload ?? 1,
         state.ammo ?? MAG_SIZE, !!state.reloading,
       );
     }
@@ -262,6 +433,10 @@ export class Renderer {
       ctx.fillStyle = mine ? '#ffe796' : '#ff9d6e';
       ctx.beginPath(); ctx.arc(b.x, b.y, shellR, 0, Math.PI * 2); ctx.fill();
     }
+
+    // Particles render OVER the tanks: a 14-screen-px spark under a 28px sprite
+    // is occluded by the very thing it is meant to be marking.
+    this._drawParticles(Math.min(0.05, dt));
 
     // ---- screen-space overlay pass ----
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -366,18 +541,35 @@ export class Renderer {
     ctx.translate(x, y);
 
     const pal = PALETTE[teamIdx & 1];
+
+    // Ground shadow — lifts the sprite off the floor and gives it weight.
+    ctx.fillStyle = 'rgba(0,0,0,0.40)';
+    ctx.beginPath();
+    ctx.ellipse(3, 5, R * 1.02, R * 0.9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.save();
     ctx.rotate(hull);
-    // treads
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(-R, -R, R * 2, 9);
-    ctx.fillRect(-R, R - 9, R * 2, 9);
+    // Treads: inset along the hull axis and thinner. Spanning the full 52px width
+    // made them the OUTERMOST element, so at 28 screen px every tank read as a
+    // black slab with a coloured dot in it rather than as a vehicle.
+    ctx.fillStyle = '#07090d';
+    ctx.fillRect(-R + 5, -R + 1, R * 2 - 10, 7);
+    ctx.fillRect(-R + 5, R - 8, R * 2 - 10, 7);
     // hull — build the rounded path once, then fill AND stroke it
-    ctx.fillStyle = pal.hull;
+    const hg = ctx.createLinearGradient(0, -R, 0, R);
+    hg.addColorStop(0, shade(color, -0.10));
+    hg.addColorStop(1, shade(color, -0.55));
     roundRect(ctx, -R + 2, -R + 8, R * 2 - 4, R * 2 - 16, 6);
+    ctx.fillStyle = hg;
     ctx.fill();
+    // dark keyline first, then the bright rim: the outline has to be the dominant
+    // read at this size, and a 2.5px stroke resolves to 1.35 screen px.
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 4.5;
+    ctx.stroke();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = 2.6;
     ctx.stroke();
     ctx.restore();
 
@@ -425,16 +617,31 @@ export class Renderer {
     const k = 1 / this.cam.zoom;
     ctx.save();
     ctx.scale(k, k);
-    const top = -(R + 4) / k;          // tank's top edge, expressed in screen-space units
-    ctx.font = '600 13px system-ui, sans-serif';
+    const top = -(R + 6) / k;          // tank's top edge, expressed in screen-space units
+    ctx.font = '600 12px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = isMe ? '#ffffff' : 'rgba(255,255,255,0.75)';
-    ctx.fillText(name || '', 0, top - 10);
-    const w = 40, h = 4;
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(-w / 2, top - 7, w, h);
-    ctx.fillStyle = hp > 55 ? '#7ed37e' : hp > 25 ? '#ffcf5e' : '#ff6b5e';
-    ctx.fillRect(-w / 2, top - 7, w * (hp / MAX_HP), h);
+    ctx.shadowColor = 'rgba(0,0,0,0.9)';
+    ctx.shadowBlur = 3;
+    ctx.fillStyle = isMe ? '#ffffff' : 'rgba(255,255,255,0.78)';
+    ctx.fillText(name || '', 0, top - 12);
+    ctx.shadowBlur = 0;
+    // Only show the bar once there's damage to report. Four permanent full bars
+    // is four pieces of chrome saying nothing, stacked over 28px sprites.
+    if (hp < MAX_HP) {
+      const w = 32, h = 5;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(-w / 2 - 1, top - 9, w + 2, h + 2);
+      // Segment to the actual TTK so a glance tells you how many shells are left.
+      const segs = Math.ceil(MAX_HP / BULLET_DAMAGE);
+      ctx.fillStyle = hp > 55 ? '#8ef5c0' : hp > 25 ? '#ffd166' : '#ff4d4d';
+      ctx.fillRect(-w / 2, top - 8, w * (hp / MAX_HP), h);
+      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      ctx.lineWidth = 1;
+      for (let s = 1; s < segs; s++) {
+        const sx = -w / 2 + (w * s) / segs;
+        ctx.beginPath(); ctx.moveTo(sx, top - 8); ctx.lineTo(sx, top - 3); ctx.stroke();
+      }
+    }
     ctx.restore();
 
     ctx.restore();

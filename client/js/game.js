@@ -22,6 +22,7 @@ const PREDICT_CONFIRM_MS = 1000; // drop unconfirmed predicted bullets after thi
 const ERR_HALFLIFE = 0.09;       // s — visual correction time constant (framerate independent)
 const MAX_ERR = 40;              // px — corrections are clamped here, never zeroed
 const ERR_MAX_RATE = 320;        // px/s — hard ceiling on visible correction speed
+const MAX_PENDING_HITS = 2;      // unconfirmed predicted hits allowed per victim
 
 export class Game {
   constructor(net) {
@@ -74,9 +75,10 @@ export class Game {
 
     // Hits we already resolved locally, so the server's echo doesn't double-play
     // the impact. See predictHit().
-    this._hitBids = new Set();
-    this._hitNonces = new Set();
+    this._hitBids = new Map();     // bid -> predicted victim id
+    this._hitNonces = new Map();   // fire nonce -> {victim, at}
     this._predDmg = new Map();     // id -> {hp, at} predicted health, see displayHp()
+    this._meHist = [];             // our own recent rendered positions, see meAt()
 
     // impulses the renderer/audio layer drains each frame
     this.shake = 0;               // screen-shake magnitude request, px
@@ -146,6 +148,15 @@ export class Game {
 
   reloading() { return this._reloadUntil > performance.now(); }
 
+  // A respawn or a new match hands you a full magazine server-side; without this
+  // a stale local reload can lock a freshly spawned tank out of firing.
+  _resetMagazine() {
+    this._reloadUntil = 0;
+    this._localAmmo = MAG_SIZE;
+    this._localAmmoAt = -1e9;
+    this._nextFireAtMs = 0;
+  }
+
   // INSTANT HITS. The server is still the authority on damage, but waiting for its
   // `bx` echo meant the impact — flash, sound, shake — landed a full round trip
   // after the shell visibly connected on YOUR screen. Since the server rewinds to
@@ -157,11 +168,11 @@ export class Game {
   predictHit(key, isNonce, x, y, victimId, serverHp) {
     if (isNonce) {
       if (this._hitNonces.has(key)) return;
-      this._hitNonces.add(key);
+      this._hitNonces.set(key, { victim: victimId, at: performance.now() });
       this.predicted.delete(key);
     } else {
       if (this._hitBids.has(key)) return;
-      this._hitBids.add(key);
+      this._hitBids.set(key, victimId);
       this.bullets.delete(key);
     }
     this.effects.push({ kind: 'hit', x, y, born: performance.now(), dur: 450 });
@@ -173,11 +184,22 @@ export class Game {
 
   // Drop the health bar the moment the shell connects. Server HP arrives a round
   // trip later, so without this the shell visibly landed and the bar sat still.
+  //
+  // Chaining is capped at MAX_PENDING unconfirmed hits: without a cap, a run of
+  // mispredicted grazes inside the fire cooldown walked a bar from full to zero
+  // and held it there for as long as you kept shooting, then snapped it back.
   predictDamage(id, serverHp) {
     const now = performance.now();
     const prev = this._predDmg.get(id);
-    const base = prev && now - prev.at < 600 ? prev.hp : serverHp;
-    this._predDmg.set(id, { hp: Math.max(0, base - BULLET_DAMAGE), at: now });
+    const fresh = prev && now - prev.at < 600;
+    const pending = fresh ? prev.pending + 1 : 1;
+    if (pending > MAX_PENDING_HITS) return;
+    const base = fresh ? prev.hp : serverHp;
+    this._predDmg.set(id, {
+      hp: Math.max(0, Math.max(base - BULLET_DAMAGE, serverHp - BULLET_DAMAGE * MAX_PENDING_HITS)),
+      at: now,
+      pending,
+    });
   }
 
   // Authoritative HP wins as soon as it catches up, and a prediction the server
@@ -190,6 +212,30 @@ export class Game {
       return serverHp;
     }
     return e.hp;
+  }
+
+  // Where OUR tank was on the interpolated timeline. Incoming shells are rendered
+  // ~INTERP_DELAY behind, so testing them against our predicted present position
+  // compared two different clocks — at 205 px/s that is ~31px of disagreement,
+  // more than a tank radius, which produced phantom hits and missed real ones.
+  meAt(renderMs) {
+    const h = this._meHist;
+    if (!h.length) return null;
+    for (let i = h.length - 1; i >= 0; i--) {
+      if (h[i].t <= renderMs) {
+        const b = h[Math.min(i + 1, h.length - 1)];
+        const span = b.t - h[i].t;
+        const f = span > 0 ? Math.min(1, (renderMs - h[i].t) / span) : 0;
+        return { x: h[i].x + (b.x - h[i].x) * f, y: h[i].y + (b.y - h[i].y) * f };
+      }
+    }
+    return h[0];
+  }
+
+  recordSelf(serverMs, x, y) {
+    const h = this._meHist;
+    h.push({ t: serverMs, x, y });
+    while (h.length > 2 && h[0].t < serverMs - 500) h.shift();
   }
 
   // Ids are recycled aggressively (lowest free 1..4, and a bot refills a vacated
@@ -276,7 +322,10 @@ export class Game {
     const wasAlive = this.meServer ? this.meServer.alive : true;
     // Taking damage used to produce literally nothing — you died without ever
     // knowing you were being shot. Surface it as shake + a feedback event.
-    if (server.alive && server.hp < this.lastHp) {
+    // Only fire the hurt feedback here if the local prediction didn't already
+    // cover it — otherwise every incoming shell thumped twice, ~1 RTT apart, and
+    // sustained fire read as double the damage it actually was.
+    if (server.alive && server.hp < this.lastHp && !this._predDmg.has(this.myId)) {
       this.shake = Math.max(this.shake, 7);
       this.events.push({ kind: 'hurt' });
     }
@@ -291,7 +340,7 @@ export class Game {
       this.pending.length = 0;
       this.me.vx = 0; this.me.vy = 0;
       if (wasAlive) {
-        this.effects.push({ kind: 'explosion', x: this.me.x, y: this.me.y, born: performance.now(), dur: 600, big: true });
+        this.effects.push({ kind: 'explosion', x: this.me.x, y: this.me.y, born: performance.now(), dur: 600, team: this.myTeam });
         this.shake = Math.max(this.shake, 14);
         this.hitstopMs = 70;   // the freeze is what sells the impact
         this.events.push({ kind: 'death' });
@@ -348,6 +397,12 @@ export class Game {
         this.predicted.clear();
         this.remotes.clear();
         this.pending.length = 0;
+        // Bullet ids restart at 1 when a room is recreated, so stale suppression
+        // entries would silently swallow the first impacts of the new session.
+        this._hitBids.clear();
+        this._hitNonces.clear();
+        this._predDmg.clear();
+        this._resetMagazine();
         break;
       case 'join':
         this.names.set(msg.id, msg.name);
@@ -383,7 +438,8 @@ export class Game {
         this._hitNonces.clear();
         this.pending.length = 0;
         this.errX = 0; this.errY = 0;
-        this._nextFireAtMs = 0;
+        this._resetMagazine();
+        this._predDmg.clear();
         for (const id of this.remotes.keys()) {
           this.remotes.get(id).length = 0;  // don't interpolate across the reset
           this._breakSmoothing(id);
@@ -394,8 +450,8 @@ export class Game {
         // We already resolved this shot locally — adopt the server's id so the
         // matching `bx` stays suppressed, and don't resurrect the shell.
         if (msg.id === this.myId && this._hitNonces.has(msg.nonce)) {
+          this._hitBids.set(msg.bid, this._hitNonces.get(msg.nonce).victim);
           this._hitNonces.delete(msg.nonce);
-          this._hitBids.add(msg.bid);
           break;
         }
         if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
@@ -425,10 +481,15 @@ export class Game {
       case 'bx': {
         // Already played locally the moment it connected on screen — the echo is
         // just confirmation, so swallow it rather than double-flashing.
+        // Only swallow the echo if it agrees with what we predicted. A shell we
+        // called a tank hit that actually struck a TOWER used to lose the tower's
+        // shake and sound entirely, and the objective took damage in silence.
         if (this._hitBids.has(msg.bid)) {
+          const predicted = this._hitBids.get(msg.bid);
           this._hitBids.delete(msg.bid);
           this.bullets.delete(msg.bid);
-          break;
+          if (msg.hit === predicted) break;
+          this._predDmg.delete(predicted);   // we were wrong: drop the fake damage
         }
         // Spawn the burst where OUR copy of the shell actually is. The client copy
         // deliberately runs ~1 RTT ahead of the server's authoritative position, so
@@ -479,7 +540,7 @@ export class Game {
         const buf = this.remotes.get(msg.id);
         if (buf) buf.length = 0; // don't interpolate across a teleport
         this._breakSmoothing(msg.id);
-        if (msg.id === this.myId) this._nextFireAtMs = 0;
+        if (msg.id === this.myId) { this._resetMagazine(); this._predDmg.delete(this.myId); }
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
       }
@@ -491,6 +552,11 @@ export class Game {
     const renderMs = this.net.serverNowMs() - INTERP_DELAY_MS;
     const stepMs = DT * 1000;
     for (const [bid, b] of this.bullets) {
+      // Where this shell was at the START of the frame. The local hit sweep needs
+      // the whole frame's travel: sweeping only from the post-step position covers
+      // at most one tick (29px at 1750 px/s), so on a 30fps phone half the shell's
+      // motion went untested and instant hits silently stopped working.
+      b.frameX = b.x; b.frameY = b.y;
       // each bullet catches its own cursor up to render time; TTL bounds the
       // loop (~45 steps) even after long tab-background gaps. Removal here is
       // cosmetic cleanup — the server 'bx' event is authoritative.
