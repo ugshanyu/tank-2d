@@ -11,8 +11,8 @@
 //    bullets, reconciled to the server's when the echo arrives.
 
 import {
-  DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, wrapAngle,
-  encAngle16, decAngle16,
+  DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
+  wrapAngle, encAngle16, decAngle16,
 } from '../shared/protocol.js';
 import { stepTank, stepBullet } from '../shared/sim.js';
 
@@ -24,7 +24,16 @@ export class Game {
   constructor(net) {
     this.net = net;
     this.myId = 0;
+    this.myTeam = 0;
     this.names = new Map();       // id -> name
+    this.teams = new Map();       // id -> team
+
+    // match state (2v2 objective mode)
+    this.towerHp = [TOWER_HP, TOWER_HP];
+    this.phase = 'playing';       // 'playing' | 'over'
+    this.winner = -1;
+    this.wins = [0, 0];
+    this.matchOverAt = 0;         // performance.now() when the result screen appeared
 
     // prediction
     this.me = null;               // predicted local tank {x,y,vx,vy,hull,...}
@@ -107,6 +116,7 @@ export class Game {
   // ---------- snapshots ----------
   onSnapshot(snap) {
     if (!this.myId) return;
+    if (snap.towerHp) this.towerHp = snap.towerHp;
     const tMs = snap.tick * DT * 1000;
 
     for (const t of snap.tanks) {
@@ -166,16 +176,47 @@ export class Game {
     switch (msg.t) {
       case 'welcome':
         this.myId = msg.id;
+        this.myTeam = msg.team ?? 0;
         this.names.clear();
-        for (const p of msg.players) this.names.set(p.id, p.name);
+        this.teams.clear();
+        for (const p of msg.players) { this.names.set(p.id, p.name); this.teams.set(p.id, p.team ?? 0); }
+        this.wins = msg.wins || [0, 0];
+        this.phase = msg.phase || 'playing';
         // reconnect hygiene: drop state from the previous connection
         this.bullets.clear();
         this.predicted.clear();
         this.remotes.clear();
         this.pending.length = 0;
         break;
-      case 'join': this.names.set(msg.id, msg.name); break;
-      case 'leave': this.names.delete(msg.id); this.remotes.delete(msg.id); break;
+      case 'join':
+        this.names.set(msg.id, msg.name);
+        this.teams.set(msg.id, msg.team ?? 0);
+        break;
+      case 'leave':
+        this.names.delete(msg.id);
+        this.teams.delete(msg.id);
+        this.remotes.delete(msg.id);
+        break;
+      case 'matchover':
+        this.phase = 'over';
+        this.winner = msg.winner;
+        this.wins = msg.wins || this.wins;
+        this.matchOverAt = performance.now();
+        // the arena is frozen server-side; drop shells so none linger on screen
+        this.bullets.clear();
+        this.predicted.clear();
+        break;
+      case 'matchstart':
+        this.phase = 'playing';
+        this.winner = -1;
+        this.wins = msg.wins || this.wins;
+        this.towerHp = [TOWER_HP, TOWER_HP];
+        this.bullets.clear();
+        this.predicted.clear();
+        this.pending.length = 0;
+        this.errX = 0; this.errY = 0;
+        for (const buf of this.remotes.values()) buf.length = 0; // don't interpolate across the reset
+        break;
       case 'fire': {
         const bornMs = msg.tick * DT * 1000;
         if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
@@ -279,13 +320,29 @@ export class Game {
 
   scoreboard() {
     const rows = [];
-    if (this.meServer) rows.push({ id: this.myId, name: this.names.get(this.myId) || 'you', score: this.meServer.score, me: true });
+    if (this.meServer) {
+      rows.push({
+        id: this.myId, name: this.names.get(this.myId) || 'you',
+        score: this.meServer.score, team: this.meServer.team ?? this.myTeam, me: true,
+      });
+    }
     for (const [id, buf] of this.remotes) {
       if (!buf.length) continue;
-      rows.push({ id, name: this.names.get(id) || '?', score: buf[buf.length - 1].score, me: false });
+      const last = buf[buf.length - 1];
+      rows.push({
+        id, name: this.names.get(id) || '?', score: last.score,
+        team: last.team ?? this.teams.get(id) ?? 0, me: false,
+      });
     }
-    rows.sort((x, y) => y.score - x.score);
+    rows.sort((x, y) => (x.team - y.team) || (y.score - x.score));
     return rows;
+  }
+
+  // total kills per team (the tower is the win condition; kills are just pressure)
+  teamScores() {
+    const s = [0, 0];
+    for (const r of this.scoreboard()) s[r.team & 1] += r.score;
+    return s;
   }
 }
 

@@ -5,7 +5,10 @@
 
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
-import { MSG, DT, encodeInput, decodeSnapshot, MAX_HP, BULLET_DAMAGE } from '../client/shared/protocol.js';
+import {
+  MSG, DT, encodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
+  TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
+} from '../client/shared/protocol.js';
 
 const PORT = 8123;
 const URL = `ws://127.0.0.1:${PORT}`;
@@ -44,7 +47,7 @@ class Bot {
         if (!isBinary) {
           const msg = JSON.parse(data.toString());
           this.events.push(msg);
-          if (msg.t === 'welcome') { this.id = msg.id; clearTimeout(to); resolve(); }
+          if (msg.t === 'welcome') { this.id = msg.id; clearTimeout(to); this._keepAlive(); resolve(); }
           return;
         }
         const buf = Buffer.from(data);
@@ -53,6 +56,13 @@ class Bot {
       });
       ws.on('error', reject);
     });
+  }
+  // The real client pings every 2 s; without it the server idle-kicks a bot that
+  // sits still (e.g. the one parked while the other sieges a tower).
+  _keepAlive() {
+    this._ka = setInterval(() => {
+      if (this.ws.readyState === 1) this.ws.send(encodePing(Date.now()));
+    }, 2000);
   }
   me() { return this.snap?.tanks.find((t) => t.id === this.id); }
   tank(id) { return this.snap?.tanks.find((t) => t.id === id); }
@@ -69,7 +79,27 @@ class Bot {
       await sleep(1000 * DT);
     }
   }
-  close() { this.ws.close(); }
+  close() { clearInterval(this._ka); this.ws.close(); }
+}
+
+// Drive to a waypoint, x first then y, with a hard tick budget. Axis-aligned so
+// the tank tracks the lanes instead of cutting corners into walls, and bounded
+// so a snag can never hang the test the way a bare `while (x < target)` would.
+async function goTo(bot, tx, ty, maxTicks = 900) {
+  let ticks = 0;
+  for (const axis of ['x', 'y']) {
+    while (ticks < maxTicks) {
+      const m = bot.me();
+      if (!m || !m.alive) return false;
+      const d = (axis === 'x' ? tx - m.x : ty - m.y);
+      if (Math.abs(d) < 14) break;
+      await bot.drive(4, axis === 'x' ? Math.sign(d) : 0, axis === 'y' ? Math.sign(d) : 0);
+      ticks += 4;
+    }
+    await bot.drive(8, 0, 0); // brake before switching axis
+    ticks += 8;
+  }
+  return ticks < maxTicks;
 }
 
 async function main() {
@@ -100,6 +130,14 @@ async function main() {
     check(!!a0 && !!b0, `both tanks in snapshots (A@${a0?.x},${a0?.y} B@${b0?.x},${b0?.y})`);
     check(a0.hp === MAX_HP && a0.alive, 'A alive at full hp');
 
+    // ---- teams + towers present ----
+    check(a0.team === 0, `A on team 0 / BLUE (got ${a0.team})`);
+    check(b0.team === 1, `B auto-balanced onto team 1 / RED (got ${b0.team})`);
+    check(
+      A.snap.towerHp[0] === TOWER_HP && A.snap.towerHp[1] === TOWER_HP,
+      `both towers at full hp (${A.snap.towerHp.join('/')})`,
+    );
+
     // ---- malformed frames must not kill the server ----
     A.ws.send('null');                              // JSON.parse('null') → not an object
     A.ws.send('{"t":123}');                         // wrong type for t
@@ -120,18 +158,12 @@ async function main() {
     check(ackGap <= 3, `input ack tracks seq (gap ${ackGap})`);
 
     // ---- position for a clear VERTICAL shot down the left lane (x≈200) ----
-    // The portrait arena's centre line is blocked by the cross-bars and centre
-    // block, but the lane between the wall nubs (x 160..240) is clear top to
-    // bottom. A spawns at (360,90) and B at (360,1190); both slide into the lane,
-    // then close to ~480px — well inside the shell's 2.2 s range.
-    while ((A.me().x) > 205) await A.drive(10, -1, 0);
-    await A.drive(12, 0, 0); // brake
-    while ((A.me().y) < 400) await A.drive(10, 0, 1);
-    await A.drive(12, 0, 0);
-    while ((B.me().x) > 205) await B.drive(10, -1, 0);
-    await B.drive(12, 0, 0);
-    while ((B.me().y) > 880) await B.drive(10, 0, -1);
-    await B.drive(12, 0, 0);
+    // The centre line is blocked by the cross-bars, centre block and both
+    // towers, but the lane between the wall nubs (x 160..240) runs clear from
+    // y≈250 to y≈1030. A (BLUE) spawns bottom-left, B (RED) top-right; both
+    // slide into the lane and close to ~290px, well inside the shell's range.
+    check(await goTo(A, 200, 870), 'A reached the lane firing position');
+    check(await goTo(B, 200, 580), 'B reached the lane firing position');
     await sleep(150);
     const aPos = A.me(), bPos = B.me();
     console.log(`  A at (${Math.round(aPos.x)},${Math.round(aPos.y)}) B at (${Math.round(bPos.x)},${Math.round(bPos.y)})`);
@@ -159,6 +191,37 @@ async function main() {
     await sleep(3000);
     check(B.me().alive && B.me().hp === MAX_HP, 'B respawned alive at full hp');
     check(B.ev('spawn').some((e) => e.id === B.id), 'spawn event broadcast');
+
+    // ---- towers: return fire, damage, and the win condition ----
+    // A (BLUE) climbs the left lane into RED tower range and sieges it. The
+    // tower shoots back, so A trades lives for damage — the intended loop.
+    // B stays parked at its top-right spawn, out of both towers' range.
+    const RED = 1;
+    let guard = 0, sawTowerFire = false, sawDamage = false;
+    while (A.snap.towerHp[RED] > 0 && guard++ < 320) {
+      const a = A.me();
+      if (!a || !a.alive) { await A.drive(6, 0, 0); continue; }   // wait out respawn
+      if (Math.abs(a.x - 200) > 22) { await A.drive(6, Math.sign(200 - a.x), 0); continue; }
+      if (a.y > 345) { await A.drive(6, 0, -1); continue; }       // up the lane into range
+      await A.drive(6, 0, 0, true, Math.atan2(130 - a.y, 360 - a.x));
+      if (A.snap.towerHp[RED] < TOWER_HP) sawDamage = true;
+      if (!sawTowerFire) sawTowerFire = A.ev('fire').some((e) => e.id >= TOWER_OWNER_BASE);
+    }
+    check(sawDamage, 'shells damage the enemy tower');
+    check(sawTowerFire, 'tower returned fire (auto-turret)');
+    check(A.snap.towerHp[RED] === 0, `RED tower destroyed (hp ${A.snap.towerHp[RED]}, ${guard} steps)`);
+    const over = A.ev('matchover');
+    check(over.length === 1 && over[0].winner === 0, `matchover -> BLUE wins (${JSON.stringify(over[0] ?? null)})`);
+    check(A.snap.towerHp[0] > 0, 'winning team keeps its own tower');
+
+    // ---- match auto-restarts ----
+    await sleep((MATCH_RESET_DELAY + 0.8) * 1000);
+    check(A.ev('matchstart').length === 1, 'match restarted automatically');
+    check(
+      A.snap.towerHp[0] === TOWER_HP && A.snap.towerHp[1] === TOWER_HP,
+      `towers restored on restart (${A.snap.towerHp.join('/')})`,
+    );
+    check(A.me().alive && A.me().hp === MAX_HP, 'A respawned at full hp for the new match');
 
     // ---- leave / rejoin ----
     A.close();

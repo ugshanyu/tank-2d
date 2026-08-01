@@ -28,7 +28,28 @@ export const FIRE_COOLDOWN = 0.33;      // s between shots (server-enforced)
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
 export const RESPAWN_DELAY = 2.5;       // seconds
-export const MAX_PLAYERS_PER_ROOM = 8;
+export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
+
+// ---- Teams ----
+export const TEAM_COUNT = 2;            // 0 = BLUE (bottom half), 1 = RED (top half)
+export const TEAM_NAMES = ['BLUE', 'RED'];
+export const FRIENDLY_FIRE = true;      // shells damage teammates and your own tower
+
+// ---- Towers ----
+// One per team. Destroying the enemy tower wins the match. Towers are also
+// auto-turrets: they acquire the nearest living enemy tank in range and fire.
+// Tower fire is server-authoritative and event-sourced exactly like tank fire —
+// clients replay the 'fire' event, they never predict tower AI.
+export const TOWER_RADIUS = 44;
+export const TOWER_HP = 400;            // 12 shell hits at BULLET_DAMAGE 34 — a lone
+                                        // tank can just barely solo it if it dodges;
+                                        // two tanks make it comfortable
+export const TOWER_RANGE = 330;         // px; enemies must commit to get in range
+export const TOWER_FIRE_COOLDOWN = 1.1; // s between tower shots
+export const TOWER_MUZZLE_OFFSET = 58;  // > TOWER_RADIUS + BULLET_RADIUS so a shell
+                                        // never detonates on the tower that fired it
+export const TOWER_OWNER_BASE = 200;    // bullet owner ids for towers (players are 1..4)
+export const MATCH_RESET_DELAY = 6;     // s from win screen to the next match
 export const INTERP_DELAY_MS = 66;      // remote entities rendered this far in the past
                                         // (~4 snapshots @60 Hz: survives a dropped
                                         // snapshot without extrapolating, still ~34 ms
@@ -107,19 +128,25 @@ export function decodePong(v) {
 }
 
 // ---- SNAPSHOT: s->c ----
-// header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count]  (9 bytes)
+// header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count][u16 towerHp0][u16 towerHp1]
+//         (13 bytes)
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
+// flags: bit0 = alive, bit1 = team. Team rides in the spare flag bit rather than
+// its own byte, so adding teams cost 0 bytes per tank on the 60 Hz hot path.
 const TANK_BYTES = 14;
-export function encodeSnapshot(tick, lastAckSeq, yourId, tanks) {
-  const buf = new ArrayBuffer(9 + tanks.length * TANK_BYTES);
+const SNAP_HEADER = 13;
+export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
+  const buf = new ArrayBuffer(SNAP_HEADER + tanks.length * TANK_BYTES);
   const v = new DataView(buf);
   v.setUint8(0, MSG.SNAPSHOT);
   v.setUint32(1, tick >>> 0, true);
   v.setUint16(5, lastAckSeq & 0xffff, true);
   v.setUint8(7, yourId);
   v.setUint8(8, tanks.length);
-  let o = 9;
+  v.setUint16(9, Math.max(0, Math.min(65535, Math.round(towerHp[0] || 0))), true);
+  v.setUint16(11, Math.max(0, Math.min(65535, Math.round(towerHp[1] || 0))), true);
+  let o = SNAP_HEADER;
   for (const t of tanks) {
     v.setUint8(o, t.id);
     v.setUint16(o + 1, Math.max(0, Math.min(65535, Math.round(t.x * POS_SCALE))), true);
@@ -129,7 +156,7 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks) {
     v.setUint8(o + 9, encAngle8(t.hull));
     v.setUint8(o + 10, encAngle8(t.turret));
     v.setUint8(o + 11, Math.max(0, Math.min(255, t.hp)));
-    v.setUint8(o + 12, (t.alive ? 1 : 0));
+    v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1));
     v.setUint8(o + 13, Math.min(255, t.score));
     o += TANK_BYTES;
   }
@@ -140,8 +167,9 @@ export function decodeSnapshot(v /* DataView */) {
   const lastAckSeq = v.getUint16(5, true);
   const yourId = v.getUint8(7);
   const count = v.getUint8(8);
+  const towerHp = [v.getUint16(9, true), v.getUint16(11, true)];
   const tanks = [];
-  let o = 9;
+  let o = SNAP_HEADER;
   for (let i = 0; i < count; i++) {
     tanks.push({
       id: v.getUint8(o),
@@ -153,9 +181,10 @@ export function decodeSnapshot(v /* DataView */) {
       turret: decAngle8(v.getUint8(o + 10)),
       hp: v.getUint8(o + 11),
       alive: (v.getUint8(o + 12) & 1) !== 0,
+      team: (v.getUint8(o + 12) >> 1) & 1,
       score: v.getUint8(o + 13),
     });
     o += TANK_BYTES;
   }
-  return { tick, lastAckSeq, yourId, tanks };
+  return { tick, lastAckSeq, yourId, tanks, towerHp };
 }

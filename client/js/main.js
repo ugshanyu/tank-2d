@@ -4,12 +4,14 @@
 // animation frame with interpolation.
 
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
-import { DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED } from '../shared/protocol.js';
+import {
+  DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
+} from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
 import { Game } from './game.js';
-import { Renderer, colorFor } from './render.js';
-import { makeTank, stepTank, stepBullet, SPAWN_POINTS } from '../shared/sim.js';
+import { Renderer, teamColor } from './render.js';
+import { makeTank, stepTank, stepBullet, TEAM_SPAWNS } from '../shared/sim.js';
 
 const canvas = document.getElementById('game');
 const $ = (id) => document.getElementById(id);
@@ -166,9 +168,10 @@ function startNet(resolveUrl) {
     onSnapshot: (s) => game.onSnapshot(s),
     onEvent: (m) => {
       game.onEvent(m);
-      if (m.t === 'welcome') toast(`In the arena — ${m.players.length} tank(s)`, 1600);
-      if (m.t === 'join' && m.id !== game.myId) toast(`${m.name} joined`, 1400);
+      if (m.t === 'welcome') toast(`You are on ${TEAM_NAMES[m.team ?? 0]} — destroy the enemy tower`, 2600);
+      if (m.t === 'join' && m.id !== game.myId) toast(`${m.name} joined ${TEAM_NAMES[m.team ?? 0]}`, 1400);
       if (m.t === 'death' && m.victim !== game.myId && m.killer === game.myId) toast('Kill! +1', 1200);
+      if (m.t === 'matchstart') toast('New match — go!', 1600);
       if (m.t === 'error') toast(m.reason, 4000);
     },
     onStatus: (s) => {
@@ -223,6 +226,8 @@ function startNet(resolveUrl) {
       meName: game.names.get(game.myId) || me.userName || '',
       mePos: game.me ? { x: game.me.x + game.errX + game.me.vx * acc, y: game.me.y + game.errY + game.me.vy * acc, hull: game.me.hull } : null,
       aimAngle,
+      myTeam: game.myTeam,
+      towerHp: game.towerHp,
       others: game.remoteStates(renderMs),
       bullets,
       effects: game.effects,
@@ -239,16 +244,36 @@ function startNet(resolveUrl) {
 }
 
 function updateHud() {
-  // scoreboard (throttled by string compare)
+  // team scoreboard: tower integrity is the win condition, kills are secondary
   const rows = game.scoreboard();
-  const html = rows.map((r) =>
-    `<div class="${r.me ? 'me' : ''}" style="color:${r.me ? '' : colorFor(r.id)}">${esc(r.name)} — ${r.score}</div>`
-  ).join('');
+  const tHp = game.towerHp;
+  let html = '';
+  for (let team = 0; team < TEAM_NAMES.length; team++) {
+    const pct = Math.round(Math.max(0, Math.min(1, (tHp[team] ?? 0) / TOWER_HP)) * 100);
+    html += `<div class="hdr" style="color:${teamColor(team)}">`
+      + `${TEAM_NAMES[team]}${team === game.myTeam ? ' (you)' : ''} · tower ${pct}%</div>`;
+    for (const r of rows) {
+      if (r.team !== team) continue;
+      html += `<div class="row ${r.me ? 'me' : ''}"><span>${esc(r.name)}</span><span>${r.score}</span></div>`;
+    }
+  }
   const el = $('scores');
   if (el.__last !== html) { el.innerHTML = html; el.__last = html; }
 
-  // respawn overlay
-  const dead = game.meServer && !game.meServer.alive;
+  // match result overlay
+  const over = game.phase === 'over';
+  $('match').style.display = over ? 'flex' : 'none';
+  if (over) {
+    const won = game.winner === game.myTeam;
+    $('matchWho').textContent = won ? 'VICTORY' : 'DEFEAT';
+    $('matchWho').style.color = teamColor(game.winner);
+    const left = Math.max(0, MATCH_RESET_DELAY - (performance.now() - game.matchOverAt) / 1000);
+    $('matchSub').textContent = `${TEAM_NAMES[game.winner]} destroyed the tower · next match in ${left.toFixed(0)}s`;
+    $('matchTally').textContent = `${TEAM_NAMES[0]} ${game.wins[0]} — ${game.wins[1]} ${TEAM_NAMES[1]}`;
+  }
+
+  // respawn overlay (suppressed while the result screen is up)
+  const dead = !over && game.meServer && !game.meServer.alive;
   $('respawn').style.display = dead ? 'flex' : 'none';
   if (dead) {
     const s = Math.max(0, (game.respawnCountdown - performance.now()) / 1000);
@@ -268,8 +293,8 @@ function startSoloPractice() {
   $('scores').innerHTML = '';
   $('status').innerHTML = '<span>practice</span>';
 
-  const spawn = SPAWN_POINTS[0];
-  const tank = makeTank(1, spawn.x, spawn.y);
+  const spawn = TEAM_SPAWNS[0][0];
+  const tank = makeTank(1, spawn.x, spawn.y, 0);
   const bullets = [];
   const effects = [];
   let nextFireAt = -10;
@@ -313,6 +338,8 @@ function startSoloPractice() {
       me: tank, meId: 1, meName: me.userName || 'you',
       mePos: { x: tank.x + tank.vx * acc, y: tank.y + tank.vy * acc, hull: tank.hull },
       aimAngle: aim,
+      myTeam: 0,
+      towerHp: [TOWER_HP, TOWER_HP],   // practice: both towers stand, neither shoots
       others: [],
       bullets: bullets.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy })),
       effects,

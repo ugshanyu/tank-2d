@@ -3,11 +3,16 @@
 // one screen — nothing scrolls, only the tanks move. World-space drawing only —
 // HUD lives in the DOM (index.html).
 
-import { ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP } from '../shared/protocol.js';
-import { OBSTACLES } from '../shared/sim.js';
+import {
+  ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP,
+  TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
+} from '../shared/protocol.js';
+import { OBSTACLES, TOWERS } from '../shared/sim.js';
 
-const COLORS = ['#4fc3f7', '#ff8a65', '#aed581', '#ba68c8', '#ffd54f', '#f06292', '#4dd0e1', '#a1887f'];
-export const colorFor = (id) => COLORS[(id - 1) % COLORS.length];
+// Identity is by TEAM, not by player — in a 2v2 objective match you need to read
+// friend-vs-foe at a glance far more than you need to tell teammates apart.
+const TEAM_COLORS = ['#4fc3f7', '#ff7a5e'];
+export const teamColor = (team) => TEAM_COLORS[team & 1];
 
 export class Renderer {
   constructor(canvas) {
@@ -83,17 +88,21 @@ export class Renderer {
       ctx.fillRect(r.x, r.y, r.w, 6);
     }
 
+    // towers (the objective) sit under everything that moves
+    const towerHp = state.towerHp || [TOWER_HP, TOWER_HP];
+    for (let i = 0; i < TOWERS.length; i++) this._tower(TOWERS[i], towerHp[i] ?? 0, state.myTeam);
+
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
     // remote tanks
     for (const t of state.others) {
       if (!t.alive) continue;
-      this._tank(t.x, t.y, t.hull, t.turret, colorFor(t.id), t.name, t.hp, false);
+      this._tank(t.x, t.y, t.hull, t.turret, teamColor(t.team), t.name, t.hp, false);
     }
     // my tank
     if (state.me && state.me.alive !== false && state.mePos) {
-      this._tank(state.mePos.x, state.mePos.y, state.mePos.hull, state.aimAngle, colorFor(state.meId), state.meName, state.me.hp ?? MAX_HP, true);
+      this._tank(state.mePos.x, state.mePos.y, state.mePos.hull, state.aimAngle, teamColor(state.myTeam), state.meName, state.me.hp ?? MAX_HP, true);
     }
 
     // bullets (small glow + motion streak)
@@ -106,6 +115,71 @@ export class Renderer {
       // never let a shell shrink below ~4 screen px at the fit-to-arena zoom
       ctx.beginPath(); ctx.arc(b.x, b.y, Math.max(BULLET_RADIUS, 4 / cam.zoom), 0, Math.PI * 2); ctx.fill();
     }
+  }
+
+  // The match objective. Enemy towers show their engagement radius so you can
+  // see the line you're about to cross; a destroyed tower is left as rubble.
+  _tower(tw, hp, myTeam) {
+    const { ctx } = this;
+    const R = TOWER_RADIUS;
+    const color = teamColor(tw.team);
+    const dead = hp <= 0;
+    const f = clamp(hp / TOWER_HP, 0, 1);
+
+    ctx.save();
+    ctx.translate(tw.x, tw.y);
+
+    if (!dead && tw.team !== myTeam) {
+      ctx.strokeStyle = rgba(color, 0.15);
+      ctx.lineWidth = 1.5 / this.cam.zoom;
+      ctx.setLineDash([7, 9]);
+      ctx.beginPath(); ctx.arc(0, 0, TOWER_RANGE, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    octagon(ctx, R);
+    ctx.fillStyle = dead ? '#171b24' : shade(color, -0.62);
+    ctx.fill();
+    ctx.strokeStyle = dead ? '#2a3242' : color;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    if (dead) {
+      ctx.strokeStyle = '#2a3242';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(-R * 0.5, -R * 0.3); ctx.lineTo(-R * 0.1, R * 0.35); ctx.lineTo(R * 0.45, -R * 0.15);
+      ctx.moveTo(-R * 0.2, -R * 0.55); ctx.lineTo(R * 0.2, R * 0.5);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    octagon(ctx, R * 0.55);
+    ctx.fillStyle = shade(color, -0.3);
+    ctx.fill();
+    ctx.strokeStyle = shade(color, 0.15);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.2, 0, Math.PI * 2); ctx.fill();
+
+    // HP bar at constant screen size (same reasoning as the tank labels)
+    const k = 1 / this.cam.zoom;
+    ctx.save();
+    ctx.scale(k, k);
+    const top = -(R + 6) / k;
+    const w = 54, h = 6;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(-w / 2, top - h, w, h);
+    ctx.fillStyle = f > 0.5 ? color : f > 0.22 ? '#ffcf5e' : '#ff6b5e';
+    ctx.fillRect(-w / 2, top - h, w * f, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-w / 2, top - h, w, h);
+    ctx.restore();
+
+    ctx.restore();
   }
 
   _tank(x, y, hull, turret, color, name, hp, isMe) {
@@ -210,6 +284,19 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+function octagon(ctx, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+function rgba(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
 }
 function shade(hex, amt) {
   const n = parseInt(hex.slice(1), 16);

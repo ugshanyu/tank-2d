@@ -12,9 +12,11 @@ import { WebSocketServer } from 'ws';
 import {
   MSG, DT, TICK_RATE, MAX_HP, TANK_RADIUS, BULLET_RADIUS, BULLET_SPEED,
   BULLET_DAMAGE, FIRE_COOLDOWN, OWNER_GRACE, MUZZLE_OFFSET, RESPAWN_DELAY,
-  MAX_PLAYERS_PER_ROOM, decodeInput, encodeSnapshot, encodePong,
+  MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
+  TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
+  decodeInput, encodeSnapshot, encodePong,
 } from '../client/shared/protocol.js';
-import { stepTank, stepBullet, makeTank, SPAWN_POINTS, OBSTACLES } from '../client/shared/sim.js';
+import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { validateAccessToken } from './auth.js';
 import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS } from './config.js';
 
@@ -34,11 +36,26 @@ class Room {
     this.players = new Map(); // playerId -> Player
     this.bullets = [];
     this.nextBulletId = 1;
+    this.towers = TOWERS.map((t) => ({ team: t.team, x: t.x, y: t.y, hp: TOWER_HP, nextFireAt: -10 }));
+    this.phase = 'playing';   // 'playing' | 'over'
+    this.winner = -1;         // team that won the last match
+    this.resetAt = 0;         // tick at which a finished match restarts
+    this.wins = [0, 0];       // matches won, per team, for the life of the room
   }
   freeId() {
     for (let i = 1; i <= MAX_PLAYERS_PER_ROOM; i++) if (!this.players.has(i)) return i;
     return 0;
   }
+  // Auto-balance: every joiner goes to the smaller team, so 1v1, 2v1 and 2v2 are
+  // all playable and a solo player never waits for a lobby to fill.
+  pickTeam() {
+    const counts = new Array(TEAM_COUNT).fill(0);
+    for (const p of this.players.values()) counts[p.tank.team]++;
+    let best = 0;
+    for (let t = 1; t < TEAM_COUNT; t++) if (counts[t] < counts[best]) best = t;
+    return best;
+  }
+  towerHp() { return this.towers.map((t) => Math.max(0, t.hp)); }
   broadcastJson(obj) {
     const s = JSON.stringify(obj);
     for (const p of this.players.values()) if (p.ws.readyState === 1) p.ws.send(s);
@@ -55,13 +72,14 @@ function getRoom(id) {
   return room;
 }
 
-function pickSpawn(room) {
-  // farthest spawn point from living enemies
-  let best = SPAWN_POINTS[0], bestD = -1;
-  for (const s of SPAWN_POINTS) {
+function pickSpawn(room, team) {
+  // your own half's spawn point that is farthest from any living ENEMY
+  const points = TEAM_SPAWNS[team] || TEAM_SPAWNS[0];
+  let best = points[0], bestD = -1;
+  for (const s of points) {
     let d = Infinity;
     for (const p of room.players.values()) {
-      if (!p.tank.alive) continue;
+      if (!p.tank.alive || p.tank.team === team) continue;
       d = Math.min(d, Math.hypot(p.tank.x - s.x, p.tank.y - s.y));
     }
     if (d > bestD) { bestD = d; best = s; }
@@ -73,6 +91,14 @@ function pickSpawn(room) {
 let tick = 0;
 
 function stepRoom(room) {
+  // Match over: the arena is frozen on the result screen. Snapshots keep
+  // flowing so clients still render the final state, then the match restarts.
+  if (room.phase === 'over') {
+    if (tick >= room.resetAt) startMatch(room);
+    sendSnapshots(room);
+    return;
+  }
+
   // 1. apply queued inputs (each input == one client tick of movement)
   for (const p of room.players.values()) {
     p.turret = p.pendingAim ?? p.turret;
@@ -105,16 +131,31 @@ function stepRoom(room) {
       if (p.id === b.owner && b.age < OWNER_GRACE) continue;
       if (segCircleDist(px, py, b.x, b.y, t.x, t.y) < TANK_RADIUS + BULLET_RADIUS) { hit = p; break; }
     }
-    if (alive && !hit) { survivors.push(b); continue; }
-    room.broadcastJson({ t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y), hit: hit ? hit.id : 0 });
+    // A shell that reached a tower is already dead (shared sim detonates it);
+    // the authoritative swept test decides whether it counts as tower damage.
+    let towerHit = -1;
+    if (!hit) {
+      for (let i = 0; i < room.towers.length; i++) {
+        const tw = room.towers[i];
+        if (tw.hp <= 0) continue;
+        if (segCircleDist(px, py, b.x, b.y, tw.x, tw.y) < TOWER_RADIUS + BULLET_RADIUS) { towerHit = i; break; }
+      }
+    }
+    if (alive && !hit && towerHit < 0) { survivors.push(b); continue; }
+    room.broadcastJson({
+      t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y),
+      hit: hit ? hit.id : 0, tower: towerHit,
+    });
     if (hit) applyDamage(room, hit, b.owner);
+    else if (towerHit >= 0) damageTower(room, towerHit);
+    if (room.phase === 'over') break; // tower fell: stop resolving this tick's shells
   }
-  room.bullets = survivors;
+  room.bullets = room.phase === 'over' ? [] : survivors;
 
   // 3. respawns
   for (const p of room.players.values()) {
     if (!p.tank.alive && p.respawnAt !== 0 && tick >= p.respawnAt) {
-      const s = pickSpawn(room);
+      const s = pickSpawn(room, p.tank.team);
       const t = p.tank;
       t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true;
       p.respawnAt = 0;
@@ -123,14 +164,94 @@ function stepRoom(room) {
     }
   }
 
-  // 4. snapshots (binary, per-client ack header)
+  // 4. tower auto-turrets
+  stepTowers(room);
+
+  // 5. snapshots (binary, per-client ack header)
+  sendSnapshots(room);
+}
+
+function sendSnapshots(room) {
   const tanks = [];
   for (const p of room.players.values()) tanks.push(p.tank);
+  const towerHp = room.towerHp();
   for (const p of room.players.values()) {
     if (p.ws.readyState !== 1) continue;
     if (p.ws.bufferedAmount > 64 * 1024) continue; // don't pile onto a choked socket
-    p.ws.send(encodeSnapshot(tick, p.lastAckSeq, p.id, tanks));
+    p.ws.send(encodeSnapshot(tick, p.lastAckSeq, p.id, tanks, towerHp));
   }
+}
+
+// Towers acquire the nearest living ENEMY tank in range and fire. Purely
+// server-side: the shot goes out as a normal 'fire' event, so clients replay it
+// through the existing deterministic bullet path and never predict tower AI.
+function stepTowers(room) {
+  const now = tick * DT;
+  for (let i = 0; i < room.towers.length; i++) {
+    const tw = room.towers[i];
+    if (tw.hp <= 0 || now < tw.nextFireAt) continue;
+
+    let target = null, bestD = TOWER_RANGE;
+    for (const p of room.players.values()) {
+      const t = p.tank;
+      if (!t.alive || t.team === tw.team) continue;
+      const d = Math.hypot(t.x - tw.x, t.y - tw.y);
+      // strict < plus an id tie-break keeps target choice deterministic
+      if (d < bestD || (d === bestD && target && p.id < target.id)) { bestD = d; target = p; }
+    }
+    if (!target) continue;
+
+    tw.nextFireAt = now + TOWER_FIRE_COOLDOWN;
+    const a = Math.atan2(target.tank.y - tw.y, target.tank.x - tw.x);
+    const x = tw.x + Math.cos(a) * TOWER_MUZZLE_OFFSET;
+    const y = tw.y + Math.sin(a) * TOWER_MUZZLE_OFFSET;
+    const b = {
+      id: room.nextBulletId++, owner: TOWER_OWNER_BASE + i, x, y,
+      vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
+      age: 0, bounces: 0,
+    };
+    room.bullets.push(b);
+    room.broadcastJson({
+      t: 'fire', id: b.owner, bid: b.id, nonce: 0,
+      x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10,
+      a: Math.round(a * 1000) / 1000, tick,
+    });
+  }
+}
+
+function damageTower(room, idx) {
+  const tw = room.towers[idx];
+  if (tw.hp <= 0) return;
+  tw.hp -= BULLET_DAMAGE;
+  if (tw.hp > 0) return;               // HP rides in the snapshot header; no event needed
+  tw.hp = 0;
+  endMatch(room, 1 - tw.team);         // whoever did NOT own this tower wins
+}
+
+function endMatch(room, winner) {
+  room.phase = 'over';
+  room.winner = winner;
+  room.wins[winner] += 1;
+  room.bullets.length = 0;
+  room.resetAt = tick + Math.round(MATCH_RESET_DELAY * TICK_RATE);
+  room.broadcastJson({ t: 'matchover', winner, wins: room.wins, resetIn: MATCH_RESET_DELAY });
+}
+
+function startMatch(room) {
+  room.phase = 'playing';
+  room.winner = -1;
+  room.bullets.length = 0;
+  for (const tw of room.towers) { tw.hp = TOWER_HP; tw.nextFireAt = -10; }
+  // clear the board first so pickSpawn never treats a stale position as an enemy
+  for (const p of room.players.values()) p.tank.alive = false;
+  for (const p of room.players.values()) {
+    const s = pickSpawn(room, p.tank.team);
+    const t = p.tank;
+    t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.score = 0;
+    p.respawnAt = 0; p.nextFireAt = -10;
+    p.inputQueue.length = 0;
+  }
+  room.broadcastJson({ t: 'matchstart', wins: room.wins });
 }
 
 function tryFire(room, p, inp) {
@@ -171,8 +292,11 @@ function applyDamage(room, victim, killerId) {
   t.hp = 0;
   t.alive = false;
   victim.respawnAt = tick + Math.round(RESPAWN_DELAY * TICK_RATE);
-  const killer = room.players.get(killerId);
-  if (killer && killer !== victim) killer.tank.score = Math.min(255, killer.tank.score + 1);
+  const killer = room.players.get(killerId); // undefined for tower kills — no score
+  // friendly fire is on, but a teamkill must not be worth a point
+  if (killer && killer !== victim && killer.tank.team !== t.team) {
+    killer.tank.score = Math.min(255, killer.tank.score + 1);
+  }
   room.broadcastJson({ t: 'death', victim: victim.id, killer: killerId });
 }
 
@@ -294,19 +418,21 @@ wss.on('connection', (ws, req) => {
         if (!id) { ws.send(JSON.stringify({ t: 'error', reason: 'room full' })); ws.close(4001); return; }
         clearTimeout(helloTimer);
         room = r;
-        const s = pickSpawn(room);
+        const team = room.pickTeam();
+        const s = pickSpawn(room, team);
         player = {
           id, userId: auth.sub, name, ws,
-          tank: makeTank(id, s.x, s.y),
+          tank: makeTank(id, s.x, s.y, team),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
           nextFireAt: -10, respawnAt: 0,
         };
         room.players.set(id, player);
         ws.send(JSON.stringify({
-          t: 'welcome', id, room: roomId, tick, tickRate: TICK_RATE,
-          players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name })),
+          t: 'welcome', id, team, room: roomId, tick, tickRate: TICK_RATE,
+          wins: room.wins, phase: room.phase,
+          players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, team: p.tank.team })),
         }));
-        room.broadcastJson({ t: 'join', id, name });
+        room.broadcastJson({ t: 'join', id, name, team });
       }
       return;
     }

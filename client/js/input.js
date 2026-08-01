@@ -111,9 +111,16 @@ export class Input {
   _attach() {
     const c = this.canvas;
     c.style.touchAction = 'none';
+    // Inside the Usion host the game runs in an iframe, and keydown only reaches
+    // it once it holds focus — without this, WASD looks broken on desktop until
+    // the player happens to click. Claim focus on load and on every press.
+    c.tabIndex = 0;
+    c.style.outline = 'none';
+    try { window.focus(); c.focus({ preventScroll: true }); } catch { /* focus is best-effort */ }
 
     c.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      try { window.focus(); c.focus({ preventScroll: true }); } catch { /* ignore */ }
       try { c.setPointerCapture(e.pointerId); } catch { /* pointer already gone (or synthetic) */ }
       const useStickZone = this.mode !== 'tilt';
       if (useStickZone && e.pointerType !== 'mouse' && !this.joy && e.clientX < window.innerWidth * 0.45) {

@@ -1,7 +1,7 @@
 # TANK
 
-Realtime multiplayer tank arena for mobile: **tilt your phone to drive, touch to aim & shoot**.
-Up to 8 players per room, instant respawns, bouncing shells. Ships as a **Usion
+Realtime **2v2 tower-destruction** tank arena for mobile: **tilt your phone to drive,
+touch to aim & shoot**. Instant respawns, bouncing shells. Ships as a **Usion
 direct-mode game** — identity, rooms, and invites come from the platform; the
 client talks binary WebSocket straight to this authoritative server (zero relay hop).
 
@@ -9,13 +9,32 @@ The arena is a single **720x1280 portrait screen**. The whole map is visible at
 all times — the camera never moves, only the tanks do, so there is no scrolling
 and no off-screen threat.
 
+## Match rules
+
+- **Two teams**, BLUE (bottom) and RED (top), max 4 players. Joiners are
+  auto-balanced onto the smaller team, so 1v1, 2v1 and 2v2 all play — nobody
+  waits in a lobby.
+- **Each team has a tower.** Destroy the enemy tower (400 HP, 12 shells) and your
+  team wins the match; it restarts automatically after 6 s. Kills are pressure,
+  not the objective.
+- **Towers shoot back.** A tower auto-acquires the nearest living enemy tank
+  within 330px and fires every 1.1 s, so a lone attacker trades lives for damage.
+  Tower fire is server-authoritative and event-sourced like tank fire — clients
+  replay it through the normal bullet path and never predict tower AI.
+- **Friendly fire is on**, including on your own tower. A teamkill scores nothing.
+- Tanks and shells both collide with towers; shells *detonate* on a tower rather
+  than bouncing off it, which is how a tower takes damage.
+
 - **Play**: launch from the Usion app (a game invite in chat, or Explore). The game
   starts immediately — no tap-to-start screen. Tilt to drive and touch to shoot;
   the first touch is what grants motion access on iOS (the OS only hands it out
   from a user gesture), and the joystick fallback drives until then. A solo
   Explore launch drops you into a local practice arena until you invite friends
   (host **Share** button) — then it promotes into a live match.
-- **Fallbacks**: no tilt sensor → virtual joystick (left half of screen); desktop → WASD/arrows + mouse.
+- **Desktop**: WASD or arrow keys to drive, mouse to aim, click or Space to fire.
+  The canvas takes focus on load and on every press — inside the Usion iframe,
+  keyboard events only arrive once it holds focus.
+- **Fallbacks**: no tilt sensor → virtual joystick (left half of screen).
 
 ## Usion integration — direct mode
 

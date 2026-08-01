@@ -5,36 +5,52 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, TANK_MAX_SPEED, TANK_ACCEL, HULL_TURN_RATE,
-  BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, wrapAngle,
+  BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, TOWER_RADIUS, wrapAngle,
 } from './protocol.js';
 
 // ---- Map: axis-aligned obstacle rects ----
 // Layout for the 720x1280 single-screen arena, mirrored about BOTH axes so no
-// spawn corner has an advantage. Every corridor is >= 70px so a 52px-wide tank
-// always fits with clearance; the side lanes at x~200 and x~520 run the full
+// spawn corner has an advantage. The side lanes at x~200 and x~520 run the full
 // height unobstructed, which keeps long-range duels possible on a small map.
+// Lane width matters more than it looks: the gap must clear the 52px tank AND
+// leave room to steer. At 120px (nub ends x140, cross-bar starts x260) the
+// tank's centre has a ~68px window — narrow it further and the lane starts
+// catching corners on every pass.
 export const OBSTACLES = [
   // center block
   { x: 300, y: 600, w: 120, h: 80 },
   // horizontal cross-bars above and below center
-  { x: 240, y: 380, w: 240, h: 44 },
-  { x: 240, y: 856, w: 240, h: 44 },
+  { x: 260, y: 380, w: 200, h: 44 },
+  { x: 260, y: 856, w: 200, h: 44 },
   // vertical side walls (four corners)
   { x: 70, y: 200, w: 40, h: 170 },
   { x: 610, y: 200, w: 40, h: 170 },
   { x: 70, y: 910, w: 40, h: 170 },
   { x: 610, y: 910, w: 40, h: 170 },
   // mid-height nubs jutting in from the left/right walls
-  { x: 40, y: 618, w: 120, h: 44 },
-  { x: 560, y: 618, w: 120, h: 44 },
+  { x: 40, y: 618, w: 100, h: 44 },
+  { x: 580, y: 618, w: 100, h: 44 },
 ];
 
-export const SPAWN_POINTS = [
-  { x: 360, y: 90 }, { x: 360, y: ARENA_H - 90 },
-  { x: 170, y: 250 }, { x: 550, y: 250 },
-  { x: 170, y: 1030 }, { x: 550, y: 1030 },
-  { x: 170, y: 500 }, { x: 550, y: 780 },
+// ---- Towers: one per team, the match objective ----
+// Geometry only (position is fixed and identical on both sides); HP is
+// authoritative server state carried in the snapshot header. Team 0 defends the
+// bottom of the arena, team 1 the top.
+export const TOWERS = [
+  { team: 0, x: ARENA_W / 2, y: ARENA_H - 130 },
+  { team: 1, x: ARENA_W / 2, y: 130 },
 ];
+
+// Spawns are per team — you always appear on your own half, near your tower.
+export const TEAM_SPAWNS = [
+  // team 0 — bottom
+  [{ x: 170, y: 1030 }, { x: 550, y: 1030 }, { x: 360, y: 950 }],
+  // team 1 — top
+  [{ x: 170, y: 250 }, { x: 550, y: 250 }, { x: 360, y: 330 }],
+];
+
+// Flat list kept for callers that just want "somewhere valid" (and for tests).
+export const SPAWN_POINTS = [...TEAM_SPAWNS[0], ...TEAM_SPAWNS[1]];
 
 // Push a circle out of an AABB along the axis of least penetration.
 // Returns null if no overlap, else {nx, ny} the outward normal used.
@@ -95,6 +111,23 @@ export function stepTank(t, input, dt) {
     }
   }
 
+  // towers are solid to tanks (both teams — you cannot hide inside your own)
+  for (const tw of TOWERS) {
+    const dx = t.x - tw.x, dy = t.y - tw.y;
+    const minD = TOWER_RADIUS + TANK_RADIUS;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= minD * minD) continue;
+    // dead-centre overlap can't happen (tanks never spawn on a tower), but a
+    // zero-length normal would produce NaN — push straight up in that case
+    const d = Math.sqrt(d2);
+    const nx = d > 1e-9 ? dx / d : 0;
+    const ny = d > 1e-9 ? dy / d : -1;
+    t.x = tw.x + nx * minD;
+    t.y = tw.y + ny * minD;
+    const vn = t.vx * nx + t.vy * ny;
+    if (vn < 0) { t.vx -= vn * nx; t.vy -= vn * ny; }
+  }
+
   // hull turns toward velocity (cosmetic but simulated identically everywhere)
   const speed = Math.hypot(t.vx, t.vy);
   if (speed > 20) {
@@ -137,6 +170,16 @@ export function stepBullet(b, dt) {
       }
     }
 
+    // Shells DETONATE on a tower rather than bouncing off it — that is how a
+    // tower takes damage. Geometry is shared, so client and server agree on
+    // exactly which substep the shell dies; the server separately runs the
+    // authoritative swept test to apply the damage.
+    for (const tw of TOWERS) {
+      const dx = b.x - tw.x, dy = b.y - tw.y;
+      const rr = TOWER_RADIUS + r;
+      if (dx * dx + dy * dy < rr * rr) return false;
+    }
+
     if (bounced) {
       b.bounces += 1;
       if (b.bounces > BULLET_MAX_BOUNCES) return false;
@@ -145,6 +188,6 @@ export function stepBullet(b, dt) {
   return true;
 }
 
-export function makeTank(id, x, y) {
-  return { id, x, y, vx: 0, vy: 0, hull: 0, turret: 0, hp: 100, alive: true, score: 0 };
+export function makeTank(id, x, y, team = 0) {
+  return { id, x, y, vx: 0, vy: 0, hull: 0, turret: 0, hp: 100, alive: true, score: 0, team };
 }
