@@ -474,6 +474,13 @@ wss.on('connection', (ws, req) => {
         for (const [pid, existing] of [...r.players]) {
           if (existing.isBot) continue;
           if (existing.userId === auth.sub) {
+            // The evicted socket's 'close' fires an event-loop turn LATER, by which
+            // point freeId() has handed its id to the reconnecting player. Without
+            // this flag that close handler deletes the freshly joined player,
+            // broadcasts their leave, and hands the seat to a bot — the client stays
+            // connected, sends inputs forever and never gets a tank. Every token
+            // refresh or cellular blip hit this.
+            existing.replaced = true;
             r.players.delete(pid);
             try { existing.ws.close(4008, 'replaced by newer session'); } catch { /* already gone */ }
           }
@@ -521,7 +528,9 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     clearTimeout(helloTimer);
-    if (player && room) {
+    // `=== player` is the load-bearing check: if this session was replaced, the id
+    // now belongs to somebody else and must not be torn down here.
+    if (player && room && !player.replaced && room.players.get(player.id) === player) {
       room.players.delete(player.id);
       // retire the leaver's in-flight bullets so a rejoining id can't inherit
       // kill credit (and clients get a clean despawn event)

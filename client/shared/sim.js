@@ -4,7 +4,7 @@
 // client-side prediction land exactly on the server result.
 
 import {
-  ARENA_W, ARENA_H, TANK_RADIUS, TANK_MAX_SPEED, TANK_ACCEL, HULL_TURN_RATE,
+  ARENA_W, ARENA_H, TANK_RADIUS, TANK_MAX_SPEED, TANK_ACCEL, TANK_BRAKE, HULL_TURN_RATE,
   BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, TOWER_RADIUS, wrapAngle,
 } from './protocol.js';
 
@@ -83,11 +83,21 @@ function resolveCircleRect(c, r, rect) {
 export function stepTank(t, input, dt) {
   let mx = input.moveX, my = input.moveY;
   const mag = Math.hypot(mx, my);
-  if (mag < 0.12) { mx = 0; my = 0; }            // deadzone
+  let idle = false;
+  if (mag < 0.12) { mx = 0; my = 0; idle = true; }
   else if (mag > 1) { mx /= mag; my /= mag; }
+  else {
+    // Rescale past the deadzone instead of cliffing at it, so the first degree of
+    // tilt/stick past neutral gives fine control rather than a jump to 12% speed.
+    const s = (mag - 0.12) / 0.88;
+    const shaped = (s * s * 0.6 + s * 0.4) / mag;
+    mx *= shaped; my *= shaped;
+  }
   const tvx = mx * TANK_MAX_SPEED;
   const tvy = my * TANK_MAX_SPEED;
-  const maxDv = TANK_ACCEL * dt;
+  // Asymmetric: releasing the stick brakes far harder than accelerating, which is
+  // what makes stopping feel deliberate instead of like sliding on ice.
+  const maxDv = (idle ? TANK_BRAKE : TANK_ACCEL) * dt;
   const dvx = Math.max(-maxDv, Math.min(maxDv, tvx - t.vx));
   const dvy = Math.max(-maxDv, Math.min(maxDv, tvy - t.vy));
   t.vx += dvx;
@@ -128,11 +138,17 @@ export function stepTank(t, input, dt) {
     if (vn < 0) { t.vx -= vn * nx; t.vy -= vn * ny; }
   }
 
-  // hull turns toward velocity (cosmetic but simulated identically everywhere)
+  // Hull turns toward velocity (cosmetic but simulated identically everywhere).
+  // Tanks reverse: pick whichever of forward/backward is the shorter rotation, so
+  // flipping direction on a small arena doesn't spin the hull 180 degrees while
+  // the tank visibly slides the other way. The low speed gate lets the hull finish
+  // its turn as you slow instead of freezing at a wrong angle.
   const speed = Math.hypot(t.vx, t.vy);
-  if (speed > 20) {
+  if (speed > 6) {
     const target = Math.atan2(t.vy, t.vx);
-    const diff = wrapAngle(target - t.hull);
+    const fwd = wrapAngle(target - t.hull);
+    const rev = wrapAngle(target + Math.PI - t.hull);
+    const diff = Math.abs(fwd) <= Math.abs(rev) ? fwd : rev;
     const maxTurn = HULL_TURN_RATE * dt;
     t.hull = wrapAngle(t.hull + Math.max(-maxTurn, Math.min(maxTurn, diff)));
   }

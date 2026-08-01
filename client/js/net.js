@@ -23,17 +23,36 @@ export class Net {
     this.clockOffset = 0;
     this._clockInit = false;
     this._pingTimer = null;
+    // 2 s ring of raw offset observations (see _updateClock)
+    this._offWindow = new Float64Array(120);
+    this._offIdx = 0;
+    this._offCount = 0;
+    this._lastClockMs = 0;
+    this._connecting = false;
+    this._generation = 0;
     this.connect();
   }
 
   connect() {
+    // A token fetch routinely outlives the 500 ms first backoff on cellular. Without
+    // this guard a second connect() lands while the first resolveUrl() is still in
+    // flight, we open two sockets, the server kicks one as a duplicate session, and
+    // its onclose schedules yet another reconnect — a self-sustaining loop that also
+    // orphans the first ping interval.
+    if (this._connecting) return;
+    this._connecting = true;
+    const gen = ++this._generation;
     this.onStatus(this._clockInit ? 'reconnecting' : 'connecting');
     // Resolve a fresh tokenized URL, then open. A failed token fetch (backend
     // hiccup, expired session) is treated like a dropped socket: back off + retry.
     Promise.resolve()
       .then(() => this.resolveUrl())
-      .then((url) => { if (!this.closedByUs) this._open(url); })
-      .catch(() => this._scheduleReconnect());
+      .then((url) => {
+        this._connecting = false;
+        if (this.closedByUs || gen !== this._generation) return; // superseded
+        this._open(url);
+      })
+      .catch(() => { this._connecting = false; this._scheduleReconnect(); });
   }
 
   _open(url) {
@@ -47,7 +66,10 @@ export class Net {
       // restarted server's tick time can be far BELOW the old estimate, and
       // the EMA only corrects downward slowly
       this._clockInit = false;
+      this._offCount = 0;
+      this._offIdx = 0;
       ws.send(JSON.stringify({ t: 'hello', name: this.name }));
+      clearInterval(this._pingTimer);
       this._pingTimer = setInterval(() => {
         if (ws.readyState === 1) ws.send(encodePing(performance.now()));
       }, 2000);
@@ -90,16 +112,52 @@ export class Net {
     this.backoff = Math.min(5000, this.backoff * 1.7);
   }
 
-  // EMA of (snapshot server-time − local arrival time). Snapshot cadence is one
-  // per tick, so jitter is small; EMA converges fast and stays smooth.
+  // Server-clock estimate. `off = serverTickTime - localArrivalTime` understates
+  // the true offset by exactly the transit delay, so the LARGEST recent sample is
+  // the least-delayed one and the best estimate.
+  //
+  // The old code latched straight onto that max on every packet. Because a single
+  // early-arriving snapshot carries the full jitter of one packet, the clock
+  // ratcheted forward on every low-latency outlier and then slid back over ~300 ms
+  // — several times a second on cellular. serverNowMs() feeds renderMs, which
+  // drives BOTH remote interpolation and every shell's catch-up loop, so that
+  // sawtooth was smeared over everything on screen that wasn't your own tank.
+  // It was the single biggest source of "not smooth".
+  //
+  // Now: max over a 2 s window (robust to one outlier), approached by bounded
+  // slew. A 2 % time-warp ceiling is imperceptible and guarantees serverNowMs()
+  // stays monotonic, which the bullet timelines rely on.
   _updateClock(tick) {
     const serverMs = tick * DT * 1000;
-    const off = serverMs - performance.now();
-    if (!this._clockInit) { this.clockOffset = off; this._clockInit = true; return; }
-    // never let the estimate drift ahead of a real observation's upper bound;
-    // track the max offset seen recently (offset is bounded above by true offset)
-    this.clockOffset += (off - this.clockOffset) * 0.05;
-    if (off > this.clockOffset) this.clockOffset = off; // fast-correct when late estimate
+    const now = performance.now();
+    const off = serverMs - now;
+
+    const w = this._offWindow;
+    w[this._offIdx] = off;
+    this._offIdx = (this._offIdx + 1) % w.length;
+    if (this._offCount < w.length) this._offCount++;
+
+    if (!this._clockInit) {
+      this.clockOffset = off;
+      this._clockInit = true;
+      this._lastClockMs = now;
+      return;
+    }
+
+    let target = -Infinity;
+    for (let i = 0; i < this._offCount; i++) if (w[i] > target) target = w[i];
+
+    const err = target - this.clockOffset;
+    // a jump this large is a reconnect or a server restart, not jitter — step it
+    if (Math.abs(err) > 250) {
+      this.clockOffset = target;
+      this._lastClockMs = now;
+      return;
+    }
+    const dtMs = Math.min(200, Math.max(0, now - this._lastClockMs));
+    this._lastClockMs = now;
+    const maxStep = 0.02 * dtMs;
+    this.clockOffset += Math.sign(err) * Math.min(Math.abs(err), maxStep);
   }
 
   serverNowMs() {

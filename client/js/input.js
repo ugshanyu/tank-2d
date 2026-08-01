@@ -2,12 +2,14 @@
 // Fallbacks: virtual joystick (left half of screen) when tilt is unavailable or
 // denied, and WASD/arrows + mouse on desktop. Uses Pointer Events throughout.
 
-const TILT_RANGE_DEG = 18;   // degrees of tilt for full speed
-const JOY_MAX = 64;          // px of drag for full joystick deflection
+const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
+const JOY_MAX = 78;          // px of drag for full joystick deflection (64 was
+                             // twitchy under a thumb arc on a 375px screen)
 
 export class Input {
   constructor(canvas) {
     this.canvas = canvas;
+    this.joyMax = JOY_MAX;
     this.mode = 'stick';               // 'tilt' | 'stick' (stick also covers kbd)
     this.moveX = 0;
     this.moveY = 0;

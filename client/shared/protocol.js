@@ -13,9 +13,14 @@ export const ARENA_W = 720;
 export const ARENA_H = 1280;
 
 export const TANK_RADIUS = 26;
-export const TANK_MAX_SPEED = 130;      // px/s (~5.5 s to cross the arena)
-export const TANK_ACCEL = 700;          // px/s^2 toward target velocity
-export const HULL_TURN_RATE = 10;       // rad/s hull visually turns toward velocity
+// Feel tuning. The old 130 px/s @ 700 px/s^2 took 186 ms to reach top speed and
+// 186 ms to coast to a stop — that ramp on both ends is exactly the "driving on
+// ice" complaint. 81 ms to full speed reads as instant without feeling twitchy,
+// and a much harder brake means releasing the stick stops you in ~50 ms/5 px.
+export const TANK_MAX_SPEED = 205;      // px/s (~3.5 s to cross the arena)
+export const TANK_ACCEL = 2600;         // px/s^2 toward target velocity
+export const TANK_BRAKE = 4200;         // px/s^2 when releasing input (asymmetric)
+export const HULL_TURN_RATE = 16;       // rad/s hull visually turns toward velocity
 export const MAX_HP = 100;
 
 export const BULLET_SPEED = 420;        // px/s
@@ -50,10 +55,14 @@ export const TOWER_MUZZLE_OFFSET = 58;  // > TOWER_RADIUS + BULLET_RADIUS so a s
                                         // never detonates on the tower that fired it
 export const TOWER_OWNER_BASE = 200;    // bullet owner ids for towers (players are 1..4)
 export const MATCH_RESET_DELAY = 6;     // s from win screen to the next match
-export const INTERP_DELAY_MS = 66;      // remote entities rendered this far in the past
-                                        // (~4 snapshots @60 Hz: survives a dropped
-                                        // snapshot without extrapolating, still ~34 ms
-                                        // more realtime than the old 30 Hz / 100 ms)
+export const INTERP_DELAY_MS = 100;     // remote entities rendered this far in the past.
+                                        // 66 ms was arithmetic for a PERFECTLY paced
+                                        // stream; real mobile arrival is bursty (2-3
+                                        // snapshots in one turn, then a 40-90 ms gap),
+                                        // so it lived in the extrapolation branch and
+                                        // popped constantly. 100 ms buys 6 ticks of
+                                        // slack and is still well under the 30 Hz
+                                        // baseline this replaced.
 
 // ---- Binary message type ids ----
 export const MSG = {

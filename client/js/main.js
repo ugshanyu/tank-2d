@@ -11,10 +11,19 @@ import { Net } from './net.js';
 import { Input } from './input.js';
 import { Game } from './game.js';
 import { Renderer, teamColor } from './render.js';
+import { Sfx, haptic } from './audio.js';
 import { makeTank, stepTank, stepBullet, TEAM_SPAWNS } from '../shared/sim.js';
 
 const canvas = document.getElementById('game');
 const $ = (id) => document.getElementById(id);
+
+// Cached once — these were being looked up ~10x per frame.
+const EL = {};
+for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrate',
+                  'match', 'matchWho', 'matchSub', 'matchTally', 'hurt']) {
+  EL[id] = document.getElementById(id);
+}
+const sfx = new Sfx();
 
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
@@ -84,6 +93,8 @@ function armFirstGesture() {
     done = true;
     window.removeEventListener('pointerdown', fire, true);
     window.removeEventListener('click', fire, true);
+
+    sfx.unlock();   // AudioContext can only start inside a gesture
 
     const tilt = await input.requestTilt();
     if (tilt === 'granted') {
@@ -185,6 +196,17 @@ function startNet(resolveUrl) {
 
   let last = performance.now();
   let acc = 0;
+  let hudAt = 0;
+  // Pooled render state — this used to allocate ~55 objects every frame, which on
+  // iOS Safari is a nursery collection (and a dropped frame) every couple of seconds.
+  const bullets = [];
+  const bulletPool = [];
+  const mePos = { x: 0, y: 0, hull: 0 };
+  const drawState = {
+    me: null, meId: 0, meName: '', mePos: null, aimAngle: 0, myTeam: 0,
+    towerHp: null, others: null, bullets, effects: null, joy: null, joyMax: 0,
+    dt: 1 / 60, lastFireAt: -1e9, reload: 1,
+  };
 
   function loop(now) {
     requestAnimationFrame(loop);
@@ -194,6 +216,13 @@ function startNet(resolveUrl) {
 
     input.poll();
 
+    // Hitstop: freeze the sim briefly on death / match end. The pause is what
+    // gives an impact weight; rendering continues so it reads as a beat, not a hang.
+    if (game.hitstopMs > 0) {
+      game.hitstopMs -= dt * 1000;
+      dt = 0;
+    }
+
     // aim: from last touch/mouse point through the camera to world space
     let aimAngle = game.aim;
     if (input.hasAim && game.me) {
@@ -202,38 +231,65 @@ function startNet(resolveUrl) {
     }
 
     acc += dt;
-    if (acc > DT * 6) acc = DT; // stall guard
+    // Clamp, don't reset — resetting to DT silently threw away up to 5 ticks of real
+    // time on every hitch, starving the server's input queue and freezing the tank.
+    if (acc > DT * 6) acc = DT * 6;
     while (acc >= DT) {
       acc -= DT;
       if (net.connected) game.tick(input, aimAngle);
     }
 
-    const renderMs = game.frame();
+    const renderMs = game.frame(dt || 1 / 60);
+    drainFeedback();
 
     // my predicted bullets extrapolate within the local tick; confirmed ones
     // within their own timeline cursor (dormant until born on the render timeline)
-    const bullets = [];
-    for (const b of game.bullets.values()) {
+    bullets.length = 0;
+    let bi = 0;
+    const take = () => (bulletPool[bi] || (bulletPool[bi] = { x: 0, y: 0, vx: 0, vy: 0, mine: false }));
+    for (const bid of game.bullets.keys()) {
+      const b = game.bullets.get(bid);
       if (b.bornMs > renderMs) continue; // fired "in the future" of the interpolated view
       const f = Math.min((renderMs - b.simMs) / 1000, DT);
-      bullets.push({ x: b.x + b.vx * f, y: b.y + b.vy * f, vx: b.vx, vy: b.vy });
+      const o = take(); bi++;
+      o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
+      o.mine = b.owner === game.myId;
+      bullets.push(o);
     }
-    for (const b of game.predicted.values()) bullets.push({ x: b.x + b.vx * acc, y: b.y + b.vy * acc, vx: b.vx, vy: b.vy });
+    for (const nonce of game.predicted.keys()) {
+      const b = game.predicted.get(nonce);
+      const o = take(); bi++;
+      o.x = b.x + b.vx * acc; o.y = b.y + b.vy * acc; o.vx = b.vx; o.vy = b.vy;
+      o.mine = true;
+      bullets.push(o);
+    }
 
-    renderer.draw({
-      me: game.meServer,
-      meId: game.myId,
-      meName: game.names.get(game.myId) || me.userName || '',
-      mePos: game.me ? { x: game.me.x + game.errX + game.me.vx * acc, y: game.me.y + game.errY + game.me.vy * acc, hull: game.me.hull } : null,
-      aimAngle,
-      myTeam: game.myTeam,
-      towerHp: game.towerHp,
-      others: game.remoteStates(renderMs),
-      bullets,
-      effects: game.effects,
-    });
+    if (game.me) {
+      mePos.x = game.me.x + game.errX + game.me.vx * acc;
+      mePos.y = game.me.y + game.errY + game.me.vy * acc;
+      mePos.hull = game.me.hull;
+    }
+    if (game.shake > 0) { renderer.addShake(game.shake); game.shake = 0; }
 
-    updateHud();
+    drawState.me = game.meServer;
+    drawState.meId = game.myId;
+    drawState.meName = game.names.get(game.myId) || me.userName || '';
+    drawState.mePos = game.me ? mePos : null;
+    drawState.aimAngle = aimAngle;
+    drawState.myTeam = game.myTeam;
+    drawState.towerHp = game.towerHp;
+    drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
+    drawState.effects = game.effects;
+    drawState.joy = input.joy;
+    drawState.joyMax = input.joyMax;
+    drawState.dt = dt || 1 / 60;
+    drawState.lastFireAt = game.lastFireAt;
+    drawState.reload = game.reloadFraction();
+    renderer.draw(drawState);
+
+    // The HUD does not need 60 Hz. It was rebuilding the scoreboard string, sorting
+    // an array and writing style.display every single frame.
+    if (now - hudAt > 100) { hudAt = now; updateHud(); }
   }
   requestAnimationFrame(loop);
 
@@ -241,6 +297,26 @@ function startNet(resolveUrl) {
     const el = $('pingv');
     if (el && net) el.textContent = `${net.rtt} ms`;
   }, 500);
+}
+
+// Turn the game's feedback queue into sound, haptics and the damage vignette.
+let hurtUntil = 0;
+function drainFeedback() {
+  const q = game.events;
+  for (let i = 0; i < q.length; i++) {
+    const e = q[i];
+    const pan = e.x !== undefined ? Math.max(-1, Math.min(1, (e.x - 360) / 360)) : 0;
+    sfx.play(e.kind, pan);
+    haptic(e.kind);
+    if (e.kind === 'hurt') hurtUntil = performance.now() + 260;
+  }
+  q.length = 0;
+
+  const hurtEl = EL.hurt;
+  if (hurtEl) {
+    const on = performance.now() < hurtUntil;
+    if (hurtEl.__on !== on) { hurtEl.__on = on; hurtEl.classList.toggle('on', on); }
+  }
 }
 
 function updateHud() {
@@ -258,27 +334,39 @@ function updateHud() {
       html += `<div class="row ${r.me ? 'me' : ''}"><span>${esc(r.name)}${tag}</span><span>${r.score}</span></div>`;
     }
   }
-  const el = $('scores');
+  const el = EL.scores;
   if (el.__last !== html) { el.innerHTML = html; el.__last = html; }
 
-  // match result overlay
+  // Match result overlay. Toggling a CSS class (not style.display) so it can
+  // actually animate — `display` is not transitionable, so every overlay used to
+  // appear as a hard cut.
   const over = game.phase === 'over';
-  $('match').style.display = over ? 'flex' : 'none';
+  if (EL.match.__on !== over) {
+    EL.match.__on = over;
+    EL.match.classList.toggle('on', over);
+    if (over) {
+      EL.matchWho.textContent = game.winner === game.myTeam ? 'VICTORY' : 'DEFEAT';
+      EL.matchWho.style.color = teamColor(game.winner);
+      EL.matchTally.textContent = `${TEAM_NAMES[0]} ${game.wins[0]} — ${game.wins[1]} ${TEAM_NAMES[1]}`;
+    }
+  }
   if (over) {
-    const won = game.winner === game.myTeam;
-    $('matchWho').textContent = won ? 'VICTORY' : 'DEFEAT';
-    $('matchWho').style.color = teamColor(game.winner);
     const left = Math.max(0, MATCH_RESET_DELAY - (performance.now() - game.matchOverAt) / 1000);
-    $('matchSub').textContent = `${TEAM_NAMES[game.winner]} destroyed the tower · next match in ${left.toFixed(0)}s`;
-    $('matchTally').textContent = `${TEAM_NAMES[0]} ${game.wins[0]} — ${game.wins[1]} ${TEAM_NAMES[1]}`;
+    const sub = `${TEAM_NAMES[game.winner]} destroyed the tower · next match in ${left.toFixed(0)}s`;
+    if (EL.matchSub.__last !== sub) { EL.matchSub.__last = sub; EL.matchSub.textContent = sub; }
   }
 
   // respawn overlay (suppressed while the result screen is up)
   const dead = !over && game.meServer && !game.meServer.alive;
-  $('respawn').style.display = dead ? 'flex' : 'none';
+  if (EL.respawn.__on !== dead) {
+    EL.respawn.__on = dead;
+    EL.respawn.classList.toggle('on', dead);
+  }
   if (dead) {
     const s = Math.max(0, (game.respawnCountdown - performance.now()) / 1000);
-    $('respawnIn').textContent = s > 0 ? `respawning in ${s.toFixed(1)}s` : 'respawning…';
+    const txt = (game.killedBy ? `killed by ${game.killedBy} · ` : '')
+      + (s > 0 ? `respawning in ${s.toFixed(1)}s` : 'respawning…');
+    if (EL.respawnIn.__last !== txt) { EL.respawnIn.__last = txt; EL.respawnIn.textContent = txt; }
   }
 }
 
@@ -299,6 +387,7 @@ function startSoloPractice() {
   const bullets = [];
   const effects = [];
   let nextFireAt = -10;
+  let lastSoloFire = -1e9;
   let last = performance.now();
   let acc = 0;
 
@@ -324,10 +413,14 @@ function startSoloPractice() {
       const t = now / 1000;
       if (input.firing && t >= nextFireAt) {
         nextFireAt = t + FIRE_COOLDOWN;
+        lastSoloFire = performance.now();
         const bx = tank.x + Math.cos(aim) * MUZZLE_OFFSET;
         const by = tank.y + Math.sin(aim) * MUZZLE_OFFSET;
         bullets.push({ x: bx, y: by, vx: Math.cos(aim) * BULLET_SPEED, vy: Math.sin(aim) * BULLET_SPEED, age: 0, bounces: 0 });
         effects.push({ kind: 'muzzle', x: bx, y: by, a: aim, born: performance.now(), dur: 90 });
+        renderer.addShake(2.5);
+        sfx.play('fire', (bx - 360) / 360);
+        haptic('fire');
       }
       for (let i = bullets.length - 1; i >= 0; i--) if (!stepBullet(bullets[i], DT)) bullets.splice(i, 1);
     }
@@ -342,8 +435,13 @@ function startSoloPractice() {
       myTeam: 0,
       towerHp: [TOWER_HP, TOWER_HP],   // practice: both towers stand, neither shoots
       others: [],
-      bullets: bullets.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy })),
+      bullets: bullets.map((b) => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, mine: true })),
       effects,
+      joy: input.joy,
+      joyMax: input.joyMax,
+      dt: dt || 1 / 60,
+      lastFireAt: lastSoloFire,
+      reload: Math.min(1, (now / 1000 - (nextFireAt - FIRE_COOLDOWN)) / FIRE_COOLDOWN),
     });
   }
   soloRAF = requestAnimationFrame(frame);
