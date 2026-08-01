@@ -346,8 +346,26 @@ async function checkAuth() {
   await new Promise((r) => jwksServer.close(r));
 }
 
+// The client's SERVICE_ID, the game server's, and the id of the row in the Usion
+// registry must all be the same string. When they drifted, the backend answered
+// the direct-access request with "Room service mismatch", the client retried
+// forever, and the ONLY symptom a player saw was an endless "reconnecting"
+// spinner — no error, no log, nothing to debug from.
+async function checkServiceId() {
+  const client = await import('../client/js/config.js');
+  const server = await import('./config.js');
+  check(client.SERVICE_ID === server.SERVICE_ID,
+    `client and server agree on SERVICE_ID (client=${client.SERVICE_ID} server=${server.SERVICE_ID})`);
+  check(/^[a-z0-9-]+$/.test(client.SERVICE_ID), `SERVICE_ID is a clean slug (${client.SERVICE_ID})`);
+  // The deployed URL the standalone/dev fallback points at must belong to the
+  // same service, or a dev connect silently talks to somebody else's server.
+  check(client.DEV_SERVER_URL.includes(client.SERVICE_ID),
+    `dev fallback URL matches the service (${client.DEV_SERVER_URL})`);
+}
+
 async function main() {
   checkProtocol();
+  await checkServiceId();
   await checkInstantHits();
   await checkProfile();
   await checkAuth();

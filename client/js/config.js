@@ -7,7 +7,12 @@
 // quick smoke test) — they only connect if the server is running with
 // DEV_ALLOW_UNSIGNED=1 (never in production).
 
-export const SERVICE_ID = 'tank';
+// MUST match the `id` of the service row in the Usion registry. The backend
+// rejects the direct-access request with "Room service mismatch" if the room's
+// service_id differs (api/games/access.py), and the game server rejects the
+// minted token if its service_id claim differs (server/auth.js) — both of which
+// surface to the player only as an endless "reconnecting" spinner.
+export const SERVICE_ID = 'tank2d';
 
 // Railway game server, used only for standalone/dev connects. Updated at deploy.
 export const DEV_SERVER_URL = 'wss://tank2d-production.up.railway.app/ws';

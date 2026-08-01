@@ -10,7 +10,11 @@ export const IS_PROD = NODE_ENV === 'production';
 
 // Usion platform integration (direct mode). The game server never talks to the
 // backend except to fetch the JWKS public keys used to verify access tokens.
-export const SERVICE_ID = env.SERVICE_ID || 'tank';
+// Must equal the `id` of this game's row in the Usion registry AND the client's
+// SERVICE_ID. The token's audience is derived from it (`usion-game-service:<id>`)
+// and its service_id claim is checked against it, so a mismatch rejects every
+// real token — which reaches the player only as an endless "reconnecting".
+export const SERVICE_ID = env.SERVICE_ID || 'tank2d';
 export const API_URL = (env.API_URL || 'https://mobile.mongolai.mn').replace(/\/$/, '');
 export const JWKS_URL = env.JWKS_URL || `${API_URL}/.well-known/jwks.json`;
 

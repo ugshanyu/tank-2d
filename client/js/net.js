@@ -35,6 +35,7 @@ export class Net {
     this.backoff = 500;
     this.attempts = 0;
     this.lastCloseCode = 0;
+    this._tokenError = null;
     // server-clock estimate: serverNowMs ≈ performance.now() + clockOffset
     this.clockOffset = 0;
     this._clockInit = false;
@@ -68,7 +69,15 @@ export class Net {
         if (this.closedByUs || gen !== this._generation) return; // superseded
         this._open(url);
       })
-      .catch(() => { this._connecting = false; this._scheduleReconnect(); });
+      .catch((err) => {
+        // A token-fetch rejection is the single most likely production failure
+        // (service-id mismatch, unpublished service, expired session) and it used
+        // to vanish into a generic "reconnecting" spinner. Keep the real reason.
+        this._connecting = false;
+        this._tokenError = (err && err.message) ? String(err.message).slice(0, 140) : 'access request failed';
+        console.error('[net] could not get a game access token:', err);
+        this._scheduleReconnect();
+      });
   }
 
   _open(url) {
@@ -79,6 +88,7 @@ export class Net {
     ws.onopen = () => {
       this.backoff = 500;
       this.attempts = 0;
+      this._tokenError = null;
       // re-anchor the server-clock estimate on every (re)connection: a
       // restarted server's tick time can be far BELOW the old estimate, and
       // the EMA only corrects downward slowly
@@ -132,7 +142,9 @@ export class Net {
     if (this.closedByUs) return;
     this.attempts += 1;
     if (this.attempts > MAX_ATTEMPTS) {
-      const reason = FATAL[this.lastCloseCode] || 'Lost connection. Check your network and reopen.';
+      const reason = FATAL[this.lastCloseCode]
+        || (this._tokenError ? `Couldn't join the match: ${this._tokenError}` : null)
+        || 'Lost connection. Check your network and reopen.';
       console.error(`[net] giving up after ${this.attempts} attempts (close ${this.lastCloseCode}): ${reason}`);
       this.onStatus('failed', reason);
       return;
