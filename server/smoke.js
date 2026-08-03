@@ -196,18 +196,29 @@ async function checkInstantHits() {
   check(g2.displayHp(2, 100 - BULLET_DAMAGE) === 100 - BULLET_DAMAGE, 'server hp takes over when it lands');
   check(g2.displayHp(2, 100) === 100, 'prediction released once confirmed');
 
-  // A FULL BURST KILLS ON THE LAST SHELL. The old cap stopped predicting after two
-  // unconfirmed hits, so shots 3 and 4 of a kill landed with the bar frozen and the
-  // target kept driving for a round trip.
+  // A BURST MOVES THE BAR BUT MUST NOT INVENT A KILL. Every local hit docks health
+  // immediately — that is cheap and self-corrects. The DEATH does not fire off a
+  // stack of unconfirmed hits: on a 200ms link the local verdict and the server's
+  // rewound one disagree often enough that a tank would explode and then get back
+  // up, which is far worse than a kill that lands a beat late.
   const g5 = newGame();
   g5.myId = 1; g5.teams.set(2, 1);
   const shells = Math.ceil(MAX_HP / BULLET_DAMAGE);
   for (let i = 0; i < shells; i++) {
     const b = g5._spawnShell(`n${i}`, 0, 0, 0, 1, false);
-    g5._endShell(b, 2, MAX_HP);
+    g5._endShell(b, 2, MAX_HP);          // server still reports the target at full hp
   }
-  check(g5.displayHp(2, MAX_HP) === 0, 'a full burst reads as dead on the shell that kills');
-  check(g5.effects.some((e) => e.kind === 'explosion'), 'and the kill plays on that frame, not a round trip later');
+  check(g5.displayHp(2, MAX_HP) === 0, 'a full burst drops the bar to zero on the shell that lands');
+  check(!g5.effects.some((e) => e.kind === 'explosion'),
+    'but a kill is NEVER predicted from hits the server has not confirmed');
+
+  // ...and once the server's own hp says the next shell is lethal, it IS instant
+  const g7 = newGame();
+  g7.myId = 1; g7.teams.set(2, 1);
+  const last = g7._spawnShell('n1', 50, 50, 0, 1, false);
+  g7._endShell(last, 2, BULLET_DAMAGE);  // authoritative hp: one shell from death
+  check(g7.effects.some((e) => e.kind === 'explosion'),
+    'the killing blow explodes on the frame it lands, not a round trip later');
 
   // a prediction the server never confirms must expire on its own
   const g6 = newGame();

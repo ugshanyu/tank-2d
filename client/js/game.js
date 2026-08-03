@@ -206,10 +206,14 @@ export class Game {
       this._addPending(victimId, s.key);
       const mine = victimId === this.myId;
       if (mine) this._selfHitAt = s.deadAt;
-      // FINAL HIT = IMMEDIATE DEATH. Waiting for the server's `death` event meant
-      // the killing blow landed, the target kept driving for a round trip, and
-      // only then blew up. If predicted health just hit zero, kill it now.
-      if (this.displayHp(victimId, serverHp) <= 0) { this._predictDeath(victimId, s.x, s.y); return; }
+      // FINAL HIT = IMMEDIATE DEATH — but only when the AUTHORITATIVE hp says this
+      // shell is genuinely lethal. Predicting a kill off a stack of unconfirmed
+      // hits meant that on a 200ms link, where our local verdict and the server's
+      // rewound one disagree often, a tank could explode and then get back up.
+      // A kill that un-happens is far worse than a kill that lands a beat late, so
+      // the health BAR still moves on every local hit (cheap, self-correcting)
+      // while the DEATH waits for hp the server has actually confirmed.
+      if (serverHp - BULLET_DAMAGE <= 0) { this._predictDeath(victimId, s.x, s.y); return; }
       this.shake = Math.max(this.shake, mine ? 7 : 3);
       this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x: s.x });
       return;
