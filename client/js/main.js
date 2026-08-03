@@ -6,7 +6,7 @@
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
 import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
-  TANK_RADIUS, BULLET_RADIUS, MAX_HP, OWNER_GRACE, MAG_SIZE,
+  MAX_HP, MAG_SIZE,
 } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
@@ -31,16 +31,6 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
   EL[id] = document.getElementById(id);
 }
 const sfx = new Sfx();
-const HIT_RADIUS = TANK_RADIUS + BULLET_RADIUS;
-
-// closest distance from segment (x1,y1)-(x2,y2) to a point — same swept test the
-// server runs, so the local verdict and the authoritative one agree
-function segPointDist(x1, y1, x2, y2, cx, cy) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const len2 = dx * dx + dy * dy;
-  const t = len2 > 0 ? Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2)) : 0;
-  return Math.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy));
-}
 
 // Safe-area insets are 0 inside a nested browsing context. If we are framed, fall
 // back to values that clear a notch/Dynamic Island and the home indicator.
@@ -349,12 +339,10 @@ function startNet(resolveUrl) {
   let hudAt = 0;
   // Pooled render state — this used to allocate ~55 objects every frame, which on
   // iOS Safari is a nursery collection (and a dropped frame) every couple of seconds.
-  const bullets = [];
-  const bulletPool = [];
   const mePos = { x: 0, y: 0, hull: 0 };
   const drawState = {
     me: null, meId: 0, meName: '', mePos: null, aimAngle: 0, myTeam: 0,
-    towerHp: null, others: null, bullets, effects: null, joy: null, joyMax: 0,
+    towerHp: null, others: null, bullets: null, effects: null, joy: null, joyMax: 0,
     dt: 1 / 60, lastFireAt: -1e9, reload: 1,
   };
 
@@ -389,38 +377,11 @@ function startNet(resolveUrl) {
       if (net.connected) game.tick(input, aimAngle);
     }
 
+    // One call: every shell advances on real frame time, spent ones are reaped,
+    // predicted damage ages out. Shells are drawn exactly where they are — no
+    // second timeline to extrapolate onto.
     const renderMs = game.frame(dt || 1 / 60);
     drainFeedback();
-
-    // my predicted bullets extrapolate within the local tick; confirmed ones
-    // within their own timeline cursor (dormant until born on the render timeline)
-    bullets.length = 0;
-    let bi = 0;
-    const take = () => (bulletPool[bi] || (bulletPool[bi] = { x: 0, y: 0, vx: 0, vy: 0, mine: false }));
-    for (const bid of game.bullets.keys()) {
-      const b = game.bullets.get(bid);
-      // Remote shells stay dormant until the interpolated timeline reaches their
-      // birth tick. YOUR OWN must not — your predicted shell is handed over on the
-      // fire echo with bornMs at the server's fire tick, which is ~(INTERP_DELAY -
-      // rtt/2) ahead of renderMs, so gating it blanked your own shell for ~75 ms
-      // right after the muzzle flash.
-      if (b.owner !== game.myId && b.bornMs > renderMs) continue;
-      const f = Math.min((renderMs - b.simMs) / 1000, DT);
-      const o = take(); bi++;
-      o.x = b.x + b.vx * f; o.y = b.y + b.vy * f; o.vx = b.vx; o.vy = b.vy;
-      o.mine = b.owner === game.myId;
-      o.key = bid; o.isNonce = false; o.owner = b.owner;
-      o.prevX = b.frameX ?? b.x; o.prevY = b.frameY ?? b.y;
-      bullets.push(o);
-    }
-    for (const nonce of game.predicted.keys()) {
-      const b = game.predicted.get(nonce);
-      const o = take(); bi++;
-      o.x = b.x + b.vx * acc; o.y = b.y + b.vy * acc; o.vx = b.vx; o.vy = b.vy;
-      o.mine = true;
-      o.key = nonce; o.isNonce = true; o.prevX = b.x; o.prevY = b.y; o.owner = game.myId;
-      bullets.push(o);
-    }
 
     if (game.me) {
       mePos.x = game.me.x + game.errX + game.me.vx * acc;
@@ -443,32 +404,11 @@ function startNet(resolveUrl) {
     drawState.towerHp = game.towerHp;
     drawState.towers = game.towerState;
     drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
-
-    // Resolve EVERY shell against exactly the tanks being drawn this frame, so an
-    // impact lands the instant it connects on screen instead of a round trip
-    // later. Swept (previous->current) so a fast shell can't skip a target.
-    // Incoming fire matters as much as outgoing: a shell that visibly passed
-    // through you and only docked health a moment later was the worst offender.
-    for (let i = bullets.length - 1; i >= 0; i--) {
-      const b = bullets[i];
-      let hit = null;
-      for (const t of drawState.others) {
-        if (!t.alive || t.id === b.owner) continue;
-        if (segPointDist(b.prevX, b.prevY, b.x, b.y, t.x, t.y) < HIT_RADIUS) { hit = t; break; }
-      }
-      // Incoming fire is tested against where WE were on the same interpolated
-      // timeline the shell is drawn on, not against our predicted present.
-      if (!hit && game.meServer && game.meServer.alive
-          && (!b.mine || b.age > OWNER_GRACE)) {
-        const past = game.meAt(renderMs);
-        if (past && segPointDist(b.prevX, b.prevY, b.x, b.y, past.x, past.y) < HIT_RADIUS) {
-          hit = { id: game.myId, hp: game.meServer.hp };
-        }
-      }
-      if (!hit) continue;
-      game.predictHit(b.key, b.isNonce, b.x, b.y, hit.id, hit.hp);
-      bullets.splice(i, 1);
-    }
+    // Resolve every shell against exactly the tanks being drawn this frame, then
+    // hand the survivors to the renderer. Impact lands the instant it connects on
+    // screen instead of a round trip later — outgoing and incoming alike.
+    game.resolveHits(drawState.others, renderMs);
+    drawState.bullets = game.renderShells();
     drawState.effects = game.effects;
     drawState.joy = input.joy;
     drawState.joyMax = input.joyMax;

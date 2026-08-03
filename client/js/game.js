@@ -6,24 +6,39 @@
 //    ~0 thanks to the shared sim) is smoothed visually, never snapped.
 //  * INTERPOLATION: remote tanks render ~100 ms in the past between two known
 //    snapshots — smooth regardless of network jitter.
-//  * BULLETS are events, not state: one 'fire' event, then both sides run the
-//    same deterministic sim. My own shots also spawn instantly as predicted
-//    bullets, reconciled to the server's when the echo arrives.
+//  * SHELLS: exactly ONE object per shot, on ONE clock (real frame time). Mine is
+//    created the moment I pull the trigger; the server's `fire` echo only re-keys
+//    that same object to the authoritative id. Nothing is ever spawned twice, and
+//    every shell resolves locally the instant it connects on screen — the server
+//    echo is a confirmation, not the trigger.
 
 import {
   DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
   RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, TOWER_OWNER_BASE,
+  TANK_RADIUS, BULLET_RADIUS, TOWER_RADIUS,
   wrapAngle, encAngle16, decAngle16,
 } from '../shared/protocol.js';
-import { stepTank, stepBullet } from '../shared/sim.js';
+import { stepTank, stepBullet, TOWERS } from '../shared/sim.js';
 
 const BUFFER_MS = 1200;          // how much snapshot history to keep per tank
 const MAX_EXTRAP_MS = 160;       // extrapolation velocity eases to zero across this
-const PREDICT_CONFIRM_MS = 1000; // drop unconfirmed predicted bullets after this
+const UNCONFIRMED_MS = 1000;     // drop a shell the server never acknowledged
+const LINGER_MS = 1200;          // keep a spent shell this long, to swallow its echo
+const PREDICT_TTL_MS = 700;      // an unconfirmed predicted hit expires after this
 const ERR_HALFLIFE = 0.09;       // s — visual correction time constant (framerate independent)
 const MAX_ERR = 40;              // px — corrections are clamped here, never zeroed
 const ERR_MAX_RATE = 320;        // px/s — hard ceiling on visible correction speed
-const MAX_PENDING_HITS = 2;      // unconfirmed predicted hits allowed per victim
+const HIT_RADIUS = TANK_RADIUS + BULLET_RADIUS;
+const TOWER_HIT_RADIUS = TOWER_RADIUS + BULLET_RADIUS + 4;
+
+// closest distance from segment (x1,y1)-(x2,y2) to a point — the same swept test
+// the server runs, so the local verdict and the authoritative one agree
+function segPointDist(x1, y1, x2, y2, cx, cy) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, ((cx - x1) * dx + (cy - y1) * dy) / len2)) : 0;
+  return Math.hypot(cx - (x1 + t * dx), cy - (y1 + t * dy));
+}
 
 export class Game {
   constructor(net) {
@@ -59,12 +74,10 @@ export class Game {
     // interpolation
     this.remotes = new Map();     // id -> [{tMs, x,y,vx,vy,hull,turret,hp,alive,score}, ...]
 
-    // bullets: confirmed (from fire events) + predicted (mine, awaiting echo).
-    // Each confirmed bullet carries its own timeline cursor (simMs): it is
-    // stepped from its birth tick up to the render time, so a bullet can never
-    // run ahead of the interpolated tanks nor depend on a pre-sync global clock.
-    this.bullets = new Map();     // bid -> {x,y,vx,vy,age,bounces,owner,bornMs,simMs}
-    this.predicted = new Map();   // nonce -> bullet (+ .bornAt wall-clock)
+    // Shells. ONE map, ONE clock. Key is the server's bullet id once known, and
+    // `n<nonce>` for one of my shots still waiting for its echo. A spent shell is
+    // marked dead and kept briefly so its echo can be matched and swallowed.
+    this.shells = new Map();      // key -> {x,y,prevX,prevY,vx,vy,age,bounces,owner,mine,dead,...}
 
     this.effects = [];            // {kind,x,y,born,dur,r}
     this.aim = 0;
@@ -73,15 +86,14 @@ export class Game {
     // pooled per-frame output (this path runs every frame for every tank)
     this._remoteOut = [];
     this._remotePool = new Map();  // id -> reusable render state + its err offset
+    this._shellOut = [];           // pooled shell list handed to the renderer
 
-    // Hits we already resolved locally, so the server's echo doesn't double-play
-    // the impact. See predictHit().
-    this._hitBids = new Map();     // bid -> predicted victim id
-    this._hitNonces = new Map();   // fire nonce -> {victim, at}
-    this._predDmg = new Map();     // id -> {hp, at} predicted health, see displayHp()
+    // Damage we have already applied locally but the server has not confirmed
+    // yet — one entry per shell that visibly connected. See displayHp().
+    this._pending = [];            // [{victim, at, key}]
+    this._selfHitAt = -1e9;        // last time a shell was resolved onto US locally
     this._meHist = [];             // our own recent rendered positions, see meAt()
     this._predDead = new Map();    // id -> when we already played their death
-    this._myBids = new Set();      // server ids of shells I fired (for damage credit)
     this.pendingAward = null;      // match result awaiting XP award
 
     // impulses the renderer/audio layer drains each frame
@@ -131,11 +143,6 @@ export class Game {
       inp.seq, inp.moveX, inp.moveY, inp.firing, inp.aim, inp.fireNonce,
       this.net.viewLagTicks(),
     );
-
-    // advance my predicted bullets on the same fixed timeline
-    for (const [nonceKey, b] of this.predicted) {
-      if (!stepBullet(b, DT)) this.predicted.delete(nonceKey);
-    }
   }
 
   // Wall clock, not seq counting. `dSeq * DT` coupled the fire rate to the frame
@@ -164,36 +171,99 @@ export class Game {
     this._nextFireAtMs = 0;
   }
 
-  // INSTANT HITS. The server is still the authority on damage, but waiting for its
-  // `bx` echo meant the impact — flash, sound, shake — landed a full round trip
-  // after the shell visibly connected on YOUR screen. Since the server rewinds to
-  // exactly the view we are testing against here (lag compensation), the local
-  // verdict and the authoritative one agree on all but grazing shots, so we can
-  // show the impact immediately and let the echo be a silent confirmation.
-  //
-  // `key` is the bullet's bid if confirmed, or its fire nonce if still predicted.
-  predictHit(key, isNonce, x, y, victimId, serverHp) {
-    if (isNonce) {
-      if (this._hitNonces.has(key)) return;
-      this._hitNonces.set(key, { victim: victimId, at: performance.now() });
-      this.predicted.delete(key);
-    } else {
-      if (this._hitBids.has(key)) return;
-      this._hitBids.set(key, victimId);
-      this.bullets.delete(key);
-    }
-    this.effects.push({ kind: 'hit', x, y, born: performance.now(), dur: 450 });
-    this.predictDamage(victimId, serverHp);
-    const mine = victimId === this.myId;
-    // FINAL HIT = IMMEDIATE DEATH. Waiting for the server's `death` event meant
-    // the killing blow landed, the target kept driving for a round trip, and only
-    // then blew up. If our predicted health just hit zero, kill it now.
-    if (this.displayHp(victimId, serverHp) <= 0) {
-      this._predictDeath(victimId, x, y);
+  // ---------- shells ----------
+  // INSTANT RESOLUTION. The server is still the authority on damage, but waiting
+  // for its `bx` echo meant the impact — flash, sound, shake — landed a full round
+  // trip after the shell visibly connected on YOUR screen. The server rewinds to
+  // exactly the view we test against here (lag compensation), so the local verdict
+  // and the authoritative one agree on all but grazing shots: play it now and let
+  // the echo confirm. A shell resolves exactly once, and the object survives its
+  // own death long enough to swallow that echo.
+
+  _spawnShell(key, x, y, a, owner, confirmed) {
+    const s = {
+      key, x, y, prevX: x, prevY: y,
+      vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
+      age: 0, bounces: 0, owner, mine: owner === this.myId,
+      bornAt: performance.now(), confirmed,
+      dead: false, deadAt: 0, hitId: 0, hitTower: -1,
+    };
+    this.shells.set(key, s);
+    return s;
+  }
+
+  // A shell is spent: mark it, play the impact, and leave it in the map so the
+  // server's echo lands on something and stays silent.
+  _endShell(s, victimId, serverHp) {
+    if (s.dead) return;
+    s.dead = true;
+    s.deadAt = performance.now();
+    s.hitId = victimId || 0;
+    s.hitTower = victimId ? -1 : nearestTower(s.x, s.y);
+
+    if (victimId) {
+      this.effects.push({ kind: 'hit', x: s.x, y: s.y, born: s.deadAt, dur: 450 });
+      this._addPending(victimId, s.key);
+      const mine = victimId === this.myId;
+      if (mine) this._selfHitAt = s.deadAt;
+      // FINAL HIT = IMMEDIATE DEATH. Waiting for the server's `death` event meant
+      // the killing blow landed, the target kept driving for a round trip, and
+      // only then blew up. If predicted health just hit zero, kill it now.
+      if (this.displayHp(victimId, serverHp) <= 0) { this._predictDeath(victimId, s.x, s.y); return; }
+      this.shake = Math.max(this.shake, mine ? 7 : 3);
+      this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x: s.x });
       return;
     }
-    this.shake = Math.max(this.shake, mine ? 7 : 3);
-    this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x });
+    if (s.hitTower >= 0) {
+      if (s.mine && s.hitTower !== this.myTeam) { this.matchTowerDamage += BULLET_DAMAGE; s.counted = true; }
+      this.effects.push({ kind: 'hit', x: s.x, y: s.y, born: s.deadAt, dur: 450 });
+      this.shake = Math.max(this.shake, 5);
+      this.events.push({ kind: 'towerhit', key: s.hitTower, x: s.x });
+      return;
+    }
+    this.effects.push({ kind: 'poof', x: s.x, y: s.y, born: s.deadAt, dur: 250 });
+    this.events.push({ kind: 'bounce', key: s.key, x: s.x });
+  }
+
+  // Resolve every live shell against exactly the tanks being DRAWN this frame, so
+  // an impact lands the instant it connects on screen. Swept (previous->current),
+  // so a 1750 px/s shell cannot skip a target between frames. Incoming fire is
+  // tested against where WE were on the same interpolated timeline the shell is
+  // drawn on, not against our predicted present — two different clocks used to
+  // produce phantom hits and miss real ones.
+  resolveHits(others, renderMs) {
+    for (const s of this.shells.values()) {
+      if (s.dead) continue;
+      let hit = null;
+      for (const t of others) {
+        if (!t.alive || t.id === s.owner) continue;
+        if (segPointDist(s.prevX, s.prevY, s.x, s.y, t.x, t.y) < HIT_RADIUS) { hit = t; break; }
+      }
+      if (!hit && !s.mine && this.meServer && this.meServer.alive) {
+        const past = this.meAt(renderMs);
+        if (past && segPointDist(s.prevX, s.prevY, s.x, s.y, past.x, past.y) < HIT_RADIUS) {
+          hit = { id: this.myId, hp: this.meServer.hp };
+        }
+      }
+      if (hit) this._endShell(s, hit.id, hit.hp);
+    }
+  }
+
+  // Wipe every shell and everything predicted from one: a respawn, a match reset
+  // or a reconnect invalidates all of it at once.
+  _clearShells() {
+    this.shells.clear();
+    this._pending.length = 0;
+    this._predDead.clear();
+    this._selfHitAt = -1e9;
+  }
+
+  // Pooled shell list for the renderer — this runs every frame.
+  renderShells() {
+    const out = this._shellOut;
+    out.length = 0;
+    for (const s of this.shells.values()) if (!s.dead) out.push(s);
+    return out;
   }
 
   // A kill, played the instant the shell lands rather than a round trip later.
@@ -228,36 +298,45 @@ export class Game {
     return true;
   }
 
-  // Drop the health bar the moment the shell connects. Server HP arrives a round
-  // trip later, so without this the shell visibly landed and the bar sat still.
-  //
-  // Chaining is capped at MAX_PENDING unconfirmed hits: without a cap, a run of
-  // mispredicted grazes inside the fire cooldown walked a bar from full to zero
-  // and held it there for as long as you kept shooting, then snapped it back.
-  predictDamage(id, serverHp) {
-    const now = performance.now();
-    const prev = this._predDmg.get(id);
-    const fresh = prev && now - prev.at < 600;
-    const pending = fresh ? prev.pending + 1 : 1;
-    if (pending > MAX_PENDING_HITS) return;
-    const base = fresh ? prev.hp : serverHp;
-    this._predDmg.set(id, {
-      hp: Math.max(0, Math.max(base - BULLET_DAMAGE, serverHp - BULLET_DAMAGE * MAX_PENDING_HITS)),
-      at: now,
-      pending,
-    });
+  // A kill we called that the server did not confirm. Snapshots lag the impact by
+  // roughly the interpolation delay plus a round trip, so anything still standing
+  // after that window was never dead — put it back rather than leaving a hole in
+  // the arena for a second and a half.
+  _releaseDeath(id) {
+    const at = this._predDead.get(id);
+    if (at !== undefined && performance.now() - at > 400) this._predDead.delete(id);
   }
 
-  // Authoritative HP wins as soon as it catches up, and a prediction the server
-  // never confirms (a graze we called a hit) expires instead of sticking.
-  displayHp(id, serverHp) {
-    const e = this._predDmg.get(id);
-    if (!e) return serverHp;
-    if (performance.now() - e.at > 600 || serverHp <= e.hp) {
-      this._predDmg.delete(id);
-      return serverHp;
+  // ---------- predicted damage ----------
+  // One entry per shell that visibly connected, released the moment the server's
+  // echo for that exact shell arrives. Because the ledger is keyed by shell rather
+  // than accumulated into a number, there is no cap to tune and no drift: a
+  // four-shell burst reads as a kill on the frame the fourth one lands, and a
+  // graze the server disagrees with releases cleanly instead of sticking.
+  _addPending(victim, key) {
+    this._pending.push({ victim, key, at: performance.now() });
+  }
+
+  _releasePending(key) {
+    for (let i = 0; i < this._pending.length; i++) {
+      if (this._pending[i].key === key) { this._pending.splice(i, 1); return true; }
     }
-    return e.hp;
+    return false;
+  }
+
+  _pendingDamage(id) {
+    const cutoff = performance.now() - PREDICT_TTL_MS;
+    let dmg = 0;
+    for (const p of this._pending) if (p.victim === id && p.at > cutoff) dmg += BULLET_DAMAGE;
+    return dmg;
+  }
+
+  hasPending(id) { return this._pendingDamage(id) > 0; }
+
+  // Authoritative HP, minus whatever we have already shown the player.
+  displayHp(id, serverHp) {
+    const dmg = this._pendingDamage(id);
+    return dmg ? Math.max(0, serverHp - dmg) : serverHp;
   }
 
   // Where OUR tank was on the interpolated timeline. Incoming shells are rendered
@@ -328,11 +407,7 @@ export class Game {
     this.shake = Math.max(this.shake, 2.5);
     this.lastFireAt = performance.now();
     this.events.push({ kind: 'fire', key: this.myId, x });
-    this.predicted.set(nonce, {
-      x, y,
-      vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
-      age: 0, bounces: 0, owner: this.myId, bornAt: performance.now(),
-    });
+    this._spawnShell(`n${nonce}`, x, y, a, this.myId, false);
     this.effects.push({ kind: 'muzzle', x, y, a, born: performance.now(), dur: 90 });
   }
 
@@ -371,7 +446,10 @@ export class Game {
     // Only fire the hurt feedback here if the local prediction didn't already
     // cover it — otherwise every incoming shell thumped twice, ~1 RTT apart, and
     // sustained fire read as double the damage it actually was.
-    if (server.alive && server.hp < this.lastHp && !this._predDmg.has(this.myId)) {
+    // (the echo that releases the ledger entry arrives one frame BEFORE the
+    // snapshot carrying the lower HP, so this checks a timestamp, not the ledger)
+    if (server.alive && server.hp < this.lastHp
+        && performance.now() - this._selfHitAt > PREDICT_TTL_MS) {
       this.shake = Math.max(this.shake, 7);
       this.events.push({ kind: 'hurt' });
     }
@@ -446,18 +524,12 @@ export class Game {
         this.matchDeaths = 0;
         this.matchTowerDamage = 0;
         this.pendingAward = null;
-        // reconnect hygiene: drop state from the previous connection
-        this.bullets.clear();
-        this.predicted.clear();
+        // reconnect hygiene: drop state from the previous connection. Bullet ids
+        // restart at 1 when a room is recreated, so a stale shell under the same
+        // key would silently swallow the first impact of the new session.
         this.remotes.clear();
         this.pending.length = 0;
-        // Bullet ids restart at 1 when a room is recreated, so stale suppression
-        // entries would silently swallow the first impacts of the new session.
-        this._hitBids.clear();
-        this._hitNonces.clear();
-        this._predDmg.clear();
-        this._predDead.clear();
-        this._myBids.clear();
+        this._clearShells();
         this._resetMagazine();
         break;
       case 'join':
@@ -489,23 +561,17 @@ export class Game {
           towerDamage: this.matchTowerDamage,
         };
         // the arena is frozen server-side; drop shells so none linger on screen
-        this.bullets.clear();
-        this.predicted.clear();
+        this._clearShells();
         break;
       case 'matchstart':
         this.phase = 'playing';
         this.winner = -1;
         this.wins = msg.wins || this.wins;
         this.towerHp = [TOWER_HP, TOWER_HP];
-        this.bullets.clear();
-        this.predicted.clear();
-        this._hitBids.clear();
-        this._hitNonces.clear();
+        this._clearShells();
         this.pending.length = 0;
         this.errX = 0; this.errY = 0;
         this._resetMagazine();
-        this._predDmg.clear();
-        this._predDead.clear();
         this.matchDeaths = 0;
         this.matchTowerDamage = 0;
         for (const id of this.remotes.keys()) {
@@ -514,37 +580,30 @@ export class Game {
         }
         break;
       case 'fire': {
-        const bornMs = msg.tick * DT * 1000;
-        // We already resolved this shot locally — adopt the server's id so the
-        // matching `bx` stays suppressed, and don't resurrect the shell.
-        if (msg.id === this.myId && this._hitNonces.has(msg.nonce)) {
-          this._hitBids.set(msg.bid, this._hitNonces.get(msg.nonce).victim);
-          this._hitNonces.delete(msg.nonce);
+        // MY shot: the shell already exists. Re-key it to the server's id — never
+        // spawn a second one. This is the whole fix for "two shells per trigger
+        // pull": the old code only adopted a shell that was still ALIVE, so any
+        // shot that had already hit a wall got re-created at the muzzle and flew
+        // the entire path again.
+        const mineKey = `n${msg.nonce}`;
+        if (msg.id === this.myId && this.shells.has(mineKey)) {
+          const s = this.shells.get(mineKey);
+          this.shells.delete(mineKey);
+          for (const p of this._pending) if (p.key === mineKey) p.key = msg.bid;
+          s.key = msg.bid;
+          s.confirmed = true;
+          this.shells.set(msg.bid, s);
           break;
         }
-        if (msg.id === this.myId) this._myBids.add(msg.bid);
-        if (msg.id === this.myId && this.predicted.has(msg.nonce)) {
-          // my predicted bullet confirmed: hand it to the confirmed set under
-          // the server's id, keeping its predicted position (continuity). Its
-          // cursor starts at the current render time — it is already "ahead".
-          const b = this.predicted.get(msg.nonce);
-          this.predicted.delete(msg.nonce);
-          b.bornMs = bornMs;
-          b.simMs = this.net.serverNowMs() - INTERP_DELAY_MS;
-          this.bullets.set(msg.bid, b);
-          break;
-        }
-        // remote shot: dormant until the interpolated timeline reaches its
-        // birth tick; frame() then steps it with its own cursor
-        this.bullets.set(msg.bid, {
-          x: msg.x, y: msg.y,
-          vx: Math.cos(msg.a) * BULLET_SPEED, vy: Math.sin(msg.a) * BULLET_SPEED,
-          age: 0, bounces: 0, owner: msg.id, bornMs, simMs: bornMs,
-        });
-        if (msg.id !== this.myId) {
-          this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
-          this.events.push({ kind: 'fire', key: msg.id, x: msg.x });
-        }
+        if (msg.id === this.myId) break;   // my shot, already spent and purged
+
+        // Remote shot. It was fired `age` ago on the render timeline, so catch it
+        // up to now in one go rather than parking it on a per-bullet cursor.
+        const s = this._spawnShell(msg.bid, msg.x, msg.y, msg.a, msg.id, true);
+        const ageMs = this.net.serverNowMs() - INTERP_DELAY_MS - msg.tick * DT * 1000;
+        if (ageMs > 0 && !this._advance(s, Math.min(ageMs, 400) / 1000)) this._endShell(s, 0, 0);
+        this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
+        this.events.push({ kind: 'fire', key: msg.id, x: msg.x });
         // Tower shots drive the tower barrel's aim and recoil.
         if (msg.id >= TOWER_OWNER_BASE) {
           const t = this.towerState[msg.id - TOWER_OWNER_BASE];
@@ -553,38 +612,33 @@ export class Game {
         break;
       }
       case 'bx': {
-        // Already played locally the moment it connected on screen — the echo is
-        // just confirmation, so swallow it rather than double-flashing.
-        // Only swallow the echo if it agrees with what we predicted. A shell we
-        // called a tank hit that actually struck a TOWER used to lose the tower's
-        // shake and sound entirely, and the objective took damage in silence.
-        const owned = this.bullets.get(msg.bid);
-        const wasMine = owned ? owned.owner === this.myId : this._myBids.has(msg.bid);
-        this._myBids.delete(msg.bid);
-        if (this._hitBids.has(msg.bid)) {
-          const predicted = this._hitBids.get(msg.bid);
-          this._hitBids.delete(msg.bid);
-          this.bullets.delete(msg.bid);
-          if (msg.hit === predicted) break;
-          this._predDmg.delete(predicted);   // we were wrong: drop the fake damage
+        const s = this.shells.get(msg.bid);
+        // a bullet retired because its owner left carries no `tower` field
+        const tower = msg.tower ?? -1;
+        this.shells.delete(msg.bid);
+        if (s && s.dead) {
+          // We already played this the moment it connected on screen. Swallow the
+          // echo if it agrees; if it does not — a shell we called a tank hit that
+          // actually struck a TOWER — drop the phantom damage and play the truth,
+          // so the objective never takes damage in silence.
+          // release either way: confirmed HP is about to arrive in the snapshot,
+          // and a misprediction must not keep charging damage that never happened
+          this._releasePending(s.key);
+          if (msg.hit === s.hitId && tower === s.hitTower) break;
         }
-        // Spawn the burst where OUR copy of the shell actually is. The client copy
-        // deliberately runs ~1 RTT ahead of the server's authoritative position, so
-        // using msg.x/msg.y made your own shell fly visibly past the impact and the
-        // explosion pop back behind it — ~34px of separation at 80ms one-way.
-        const local = this.bullets.get(msg.bid);
-        const mine = wasMine;
-        const ex = local ? local.x : msg.x;
-        const ey = local ? local.y : msg.y;
-        this.bullets.delete(msg.bid);
+        // Burst where OUR copy of the shell is: the client copy deliberately runs
+        // ~1 RTT ahead of the server's authoritative position, so msg.x/msg.y put
+        // the explosion ~34px behind the shell at 80ms one-way.
+        const ex = s ? s.x : msg.x;
+        const ey = s ? s.y : msg.y;
         this.effects.push({
           kind: msg.hit ? 'hit' : 'poof',
           x: ex, y: ey, born: performance.now(), dur: msg.hit ? 450 : 250,
         });
-        if (msg.tower >= 0) {
-          if (mine && msg.tower !== this.myTeam) this.matchTowerDamage += BULLET_DAMAGE;
+        if (tower >= 0) {
+          if (s && s.mine && !s.counted && tower !== this.myTeam) this.matchTowerDamage += BULLET_DAMAGE;
           this.shake = Math.max(this.shake, 5);
-          this.events.push({ kind: 'towerhit', key: msg.tower, x: ex });
+          this.events.push({ kind: 'towerhit', key: tower, x: ex });
         } else if (msg.hit) {
           this.events.push({ kind: msg.hit === this.myId ? 'hurt' : 'hit', key: msg.hit, x: ex });
         } else {
@@ -634,30 +688,53 @@ export class Game {
         if (buf) buf.length = 0; // don't interpolate across a teleport
         this._breakSmoothing(msg.id);
         this._predDead.delete(msg.id);
-        if (msg.id === this.myId) { this._resetMagazine(); this._predDmg.delete(this.myId); }
+        // a fresh tank starts on full HP: nothing predicted about the old one applies
+        for (let i = this._pending.length - 1; i >= 0; i--) {
+          if (this._pending[i].victim === msg.id) this._pending.splice(i, 1);
+        }
+        if (msg.id === this.myId) { this._resetMagazine(); this._selfHitAt = -1e9; }
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
       }
     }
   }
 
-  // ---------- per-render-frame: advance confirmed bullets on the remote timeline ----------
+  // Push a shell forward by `secs` of flight, in fixed sim steps so wall contact
+  // is found at the same place the server finds it. Returns false if it expired.
+  _advance(s, secs) {
+    let left = secs;
+    while (left > 1e-6) {
+      const h = Math.min(DT, left);
+      left -= h;
+      if (!stepBullet(s, h)) return false;
+    }
+    return true;
+  }
+
+  // ---------- per-render-frame ----------
   frame(dtSec = 1 / 60) {
     const renderMs = this.net.serverNowMs() - INTERP_DELAY_MS;
-    const stepMs = DT * 1000;
-    for (const [bid, b] of this.bullets) {
-      // Where this shell was at the START of the frame. The local hit sweep needs
-      // the whole frame's travel: sweeping only from the post-step position covers
-      // at most one tick (29px at 1750 px/s), so on a 30fps phone half the shell's
-      // motion went untested and instant hits silently stopped working.
-      b.frameX = b.x; b.frameY = b.y;
-      // each bullet catches its own cursor up to render time; TTL bounds the
-      // loop (~45 steps) even after long tab-background gaps. Removal here is
-      // cosmetic cleanup — the server 'bx' event is authoritative.
-      while (b.simMs + stepMs <= renderMs) {
-        if (!stepBullet(b, DT)) { this.bullets.delete(bid); break; }
-        b.simMs += stepMs;
+    const now = performance.now();
+
+    // Every shell, live or spent, on one clock: real elapsed frame time. No
+    // per-bullet cursor, no dormancy, no second timeline to disagree with.
+    for (const [key, s] of this.shells) {
+      if (s.dead) {
+        if (now - s.deadAt > LINGER_MS) this.shells.delete(key);
+        continue;
       }
+      if (!s.confirmed && now - s.bornAt > UNCONFIRMED_MS) { this.shells.delete(key); continue; }
+      // Keep the whole frame's travel for the swept hit test: sweeping from the
+      // post-step position only covers one tick (29px at 1750 px/s), so on a
+      // 30 fps phone half the shell's motion went untested.
+      s.prevX = s.x; s.prevY = s.y;
+      if (!this._advance(s, Math.min(dtSec, 0.1))) this._endShell(s, 0, 0);
+    }
+
+    // Drop predicted damage the server never confirmed (a graze we called a hit).
+    const cutoff = now - PREDICT_TTL_MS;
+    for (let i = this._pending.length - 1; i >= 0; i--) {
+      if (this._pending[i].at <= cutoff) this._pending.splice(i, 1);
     }
 
     // Decay the correction offset on WALL CLOCK, not per frame. `*= 0.86` per frame
@@ -671,11 +748,6 @@ export class Game {
     this.errX *= scale;
     this.errY *= scale;
 
-    // prune stale predicted bullets (server never confirmed the shot)
-    const now = performance.now();
-    for (const [nonce, b] of this.predicted) {
-      if (now - b.bornAt > PREDICT_CONFIRM_MS) this.predicted.delete(nonce);
-    }
     this.effects = this.effects.filter((e) => now - e.born < e.dur);
     return renderMs;
   }
@@ -745,6 +817,7 @@ export class Game {
       st.vx = b.vx; st.vy = b.vy;
       st.hull = hull; st.turret = turret;
       st.hp = this.displayHp(id, b.hp);
+      if (b.alive && b.hp > 0) this._releaseDeath(id);
       st.alive = b.alive && !this._deathPredicted(id);
       st.score = b.score; st.team = b.team;
       st.name = this.names.get(id) || '?';
@@ -780,6 +853,16 @@ export class Game {
     for (const r of this.scoreboard()) s[r.team & 1] += r.score;
     return s;
   }
+}
+
+// Which tower did this shell detonate on, if any? The shared sim kills a shell
+// that reaches a tower, so proximity at death is the whole classification.
+function nearestTower(x, y) {
+  for (let i = 0; i < TOWERS.length; i++) {
+    const t = TOWERS[i];
+    if (Math.hypot(x - t.x, y - t.y) <= TOWER_HIT_RADIUS) return i;
+  }
+  return -1;
 }
 
 const lerp = (a, b, f) => a + (b - a) * f;

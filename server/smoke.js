@@ -138,24 +138,29 @@ function checkProtocol() {
 // on screen, and the server's echo must then be swallowed rather than replayed.
 // game.js imports only pure modules, so it runs headless.
 async function checkInstantHits() {
-  const { Game } = await import('../client/shared/../js/game.js');
-  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const { Game } = await import('../client/js/game.js');
+  const newGame = () => new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g = newGame();
   g.myId = 1;
 
-  // a shell of mine, still predicted (no server id yet)
-  g.predicted.set(7, { x: 100, y: 100, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1 });
-  g.predictHit(7, true, 100, 100, 2);
+  // a shell of mine, fired but not yet acknowledged by the server
+  const s = g._spawnShell('n7', 100, 100, 0, 1, false);
+  s.vx = 0; s.vy = 0;
+  g._endShell(s, 2, 100);
   check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'impact plays immediately on a local hit');
   check(g.events.filter((e) => e.kind === 'hit').length === 1, 'hit sound/haptic fires immediately');
-  check(!g.predicted.has(7), 'locally-resolved shell is removed at once');
+  check(!g.renderShells().includes(s), 'locally-resolved shell stops being drawn at once');
 
   // the same shot is idempotent if the frame runs twice
-  g.predictHit(7, true, 100, 100, 2);
+  g._endShell(s, 2, 100);
   check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'local hit is not double-played');
 
-  // the fire echo must not resurrect the shell
+  // THE TWO-SHELL BUG: the fire echo must adopt the shell I already have, never
+  // spawn a second one — even though this one is already spent.
   g.onEvent({ t: 'fire', id: 1, bid: 55, nonce: 7, x: 100, y: 100, a: 0, tick: 0 });
-  check(!g.bullets.has(55), 'server fire echo does not resurrect a resolved shell');
+  check(g.shells.size === 1 && g.shells.get(55) === s,
+    `one trigger pull is exactly one shell (${g.shells.size} in flight)`);
+  check(g.renderShells().length === 0, 'and a resolved shell is never resurrected on screen');
 
   // ...and the impact echo must be swallowed, not replayed
   const before = g.effects.length;
@@ -163,50 +168,160 @@ async function checkInstantHits() {
   g.onEvent({ t: 'bx', bid: 55, x: 100, y: 100, hit: 2, tower: -1 });
   check(g.effects.length === before, 'server bx echo does not double-flash the impact');
   check(g.events.length === evBefore, 'server bx echo does not double-play the sound');
-  check(!g.bullets.has(55), 'shell gone after the echo');
+  check(!g.shells.has(55), 'shell gone after the echo');
+
+  // a live shell of mine that the echo arrives for keeps flying as ONE object
+  const live = g._spawnShell('n8', 300, 300, 0, 1, false);
+  g.onEvent({ t: 'fire', id: 1, bid: 60, nonce: 8, x: 10, y: 10, a: 0, tick: 0 });
+  check(g.shells.size === 1 && g.shells.get(60) === live && live.x === 300,
+    'an in-flight shell is re-keyed in place, not respawned at the muzzle');
+  check(g.renderShells().length === 1, 'so only one shell is ever drawn per shot');
 
   // an UNPREDICTED hit still plays normally from the server
-  g.bullets.set(56, { x: 5, y: 5, vx: 0, vy: 0, age: 0, bounces: 0, owner: 2, bornMs: 0, simMs: 0 });
+  g._spawnShell(56, 5, 5, 0, 2, true);
+  const fx56 = g.effects.length;
   g.onEvent({ t: 'bx', bid: 56, x: 5, y: 5, hit: 1, tower: -1 });
-  check(g.effects.length === before + 1, 'server-only impacts still play');
+  check(g.effects.length === fx56 + 1, 'server-only impacts still play');
 
   // ---- predicted damage: the health bar must move on impact ----
-  const g2 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g2 = newGame();
   g2.myId = 1;
   check(g2.displayHp(2, 100) === 100, 'undamaged tank shows server hp');
-  g2.predictDamage(2, 100);
+  const s2 = g2._spawnShell('n1', 0, 0, 0, 1, false);
+  g2._endShell(s2, 2, 100);
   check(g2.displayHp(2, 100) === 100 - BULLET_DAMAGE, 'health drops immediately on a predicted hit');
-  // authoritative HP wins the moment it catches up
+  // the echo releases the prediction; authoritative HP takes over cleanly
+  g2.onEvent({ t: 'fire', id: 1, bid: 11, nonce: 1, x: 0, y: 0, a: 0, tick: 0 });
+  g2.onEvent({ t: 'bx', bid: 11, x: 0, y: 0, hit: 2, tower: -1 });
   check(g2.displayHp(2, 100 - BULLET_DAMAGE) === 100 - BULLET_DAMAGE, 'server hp takes over when it lands');
   check(g2.displayHp(2, 100) === 100, 'prediction released once confirmed');
 
-  // a run of mispredictions must NOT walk a bar to zero
-  for (let i = 0; i < 10; i++) g2.predictDamage(3, 100);
-  const floor = g2.displayHp(3, 100);
-  check(floor >= 100 - BULLET_DAMAGE * 2, `unconfirmed predictions capped (bar at ${floor}, not 0)`);
+  // A FULL BURST KILLS ON THE LAST SHELL. The old cap stopped predicting after two
+  // unconfirmed hits, so shots 3 and 4 of a kill landed with the bar frozen and the
+  // target kept driving for a round trip.
+  const g5 = newGame();
+  g5.myId = 1; g5.teams.set(2, 1);
+  const shells = Math.ceil(MAX_HP / BULLET_DAMAGE);
+  for (let i = 0; i < shells; i++) {
+    const b = g5._spawnShell(`n${i}`, 0, 0, 0, 1, false);
+    g5._endShell(b, 2, MAX_HP);
+  }
+  check(g5.displayHp(2, MAX_HP) === 0, 'a full burst reads as dead on the shell that kills');
+  check(g5.effects.some((e) => e.kind === 'explosion'), 'and the kill plays on that frame, not a round trip later');
+
+  // a prediction the server never confirms must expire on its own
+  const g6 = newGame();
+  g6.myId = 1;
+  const ghost = g6._spawnShell('n1', 0, 0, 0, 1, false);
+  g6._endShell(ghost, 3, 100);
+  check(g6.displayHp(3, 100) < 100, 'a graze docks health immediately');
+  g6._pending[0].at -= 5000;                    // pretend the echo never came
+  check(g6.displayHp(3, 100) === 100, 'an unconfirmed prediction expires instead of sticking');
 
   // ---- taking a hit must not double-fire the hurt feedback ----
-  const g3 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g3 = newGame();
   g3.myId = 1;
   g3.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 0 };
   g3.lastHp = 100;
   g3.me = { x: 0, y: 0, vx: 0, vy: 0, hull: 0 };
-  g3.predictHit(9, false, 0, 0, 1, 100);       // shell hits ME, predicted locally
+  const incoming = g3._spawnShell(9, 0, 0, 0, 2, true);
+  g3._endShell(incoming, 1, 100);              // shell hits ME, resolved locally
   const hurtAfterPredict = g3.events.filter((e) => e.kind === 'hurt').length;
+  g3.onEvent({ t: 'bx', bid: 9, x: 0, y: 0, hit: 1, tower: -1 });
   g3._reconcile({ hp: 100 - BULLET_DAMAGE, alive: true, x: 0, y: 0, vx: 0, vy: 0, hull: 0 }, 0);
   const hurtAfterServer = g3.events.filter((e) => e.kind === 'hurt').length;
   check(hurtAfterPredict === 1, 'taking a hit fires hurt feedback once, immediately');
   check(hurtAfterServer === 1, 'server confirmation does NOT replay the hurt feedback');
 
   // ---- a wrong-victim prediction must not swallow the real event ----
-  const g4 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g4 = newGame();
   g4.myId = 1;
-  g4.bullets.set(70, { x: 0, y: 0, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1, bornMs: 0, simMs: 0 });
-  g4.predictHit(70, false, 0, 0, 2, 100);      // we guessed it hit tank 2
+  const wrong = g4._spawnShell(70, 0, 0, 0, 1, true);
+  g4._endShell(wrong, 2, 100);                  // we guessed it hit tank 2
   const fx = g4.effects.length;
   g4.onEvent({ t: 'bx', bid: 70, x: 0, y: 0, hit: 0, tower: 1 });  // it actually hit a TOWER
   check(g4.effects.length > fx, 'a mispredicted shell still plays the real impact');
   check(g4.events.some((e) => e.kind === 'towerhit'), 'tower damage is never silent after a misprediction');
+  check(g4.displayHp(2, 100) === 100, 'and the phantom damage is released');
+}
+
+// The duplicate-shell bug only appeared when the server's `fire` echo arrived
+// AFTER the shell had already died — which never happens at 0 ms on loopback.
+// So run a real client loop against the real server through the impairment relay,
+// firing at a wall two tank-lengths away: flight time is well under the fire
+// cooldown, so at no instant may more than ONE of my shells exist.
+async function checkLiveShells(port) {
+  const { Game } = await import('../client/js/game.js');
+  const { startNetSim } = await import('./netsim.js');
+  const sim = startNetSim({ listenPort: 8125, targetPort: port, latencyMs: 60, jitterMs: 15 });
+
+  const ws = new WebSocket(`ws://127.0.0.1:8125/ws?token=${encodeURIComponent('dev:shellprobe:shellroom')}`);
+  ws.binaryType = 'arraybuffer';
+  let snapTick = 0, snapAt = Date.now();
+  const game = new Game({
+    sendInput: (seq, mx, my, f, aim, nonce, lag) => {
+      if (ws.readyState === 1) ws.send(encodeInput(seq, mx, my, f, aim, nonce, lag));
+    },
+    serverNowMs: () => snapTick * DT * 1000 + (Date.now() - snapAt),
+    rtt: 120,
+    viewLagTicks: () => 10,
+  });
+
+  let spawned = 0, fireEchoes = 0, maxLive = 0;
+  const realSpawn = game._spawnShell.bind(game);
+  game._spawnShell = (key, x, y, a, owner, confirmed) => {
+    if (owner === game.myId) spawned++;
+    return realSpawn(key, x, y, a, owner, confirmed);
+  };
+
+  await new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error('live client connect timeout')), 5000);
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe' })));
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) {
+        const msg = JSON.parse(data.toString());
+        game.onEvent(msg);
+        if (msg.t === 'fire' && msg.id === game.myId) fireEchoes++;
+        if (msg.t === 'welcome') { clearTimeout(to); resolve(); }
+        return;
+      }
+      const buf = Buffer.from(data);
+      const v = new DataView(buf.buffer, buf.byteOffset, buf.length);
+      if (v.getUint8(0) === MSG.SNAPSHOT) {
+        const snap = decodeSnapshot(v);
+        snapTick = snap.tick; snapAt = Date.now();
+        game.onSnapshot(snap);
+      }
+    });
+    ws.on('error', reject);
+  });
+
+  const ka = setInterval(() => { if (ws.readyState === 1) ws.send(encodePing(Date.now())); }, 2000);
+  const liveNow = () => {
+    let n = 0;
+    for (const s of game.shells.values()) if (!s.dead && s.owner === game.myId) n++;
+    return n;
+  };
+  // Straight at the side wall a few tank-lengths away: each shell is spent long
+  // before the next one leaves the barrel, and long before its own echo arrives.
+  const aim = Math.PI;
+  for (let i = 0; i < 150; i++) {            // ~2.5 s of held fire
+    if (game.me) game.tick({ moveX: 0, moveY: 0, firing: true }, aim);
+    maxLive = Math.max(maxLive, liveNow());  // sample with the fresh shell in hand
+    game.frame(DT);
+    maxLive = Math.max(maxLive, liveNow());
+    await sleep(1000 * DT);
+  }
+  await sleep(400);                          // let the last echoes land
+
+  check(spawned > 0 && fireEchoes > 0, `the live client actually fired (${spawned} shells, ${fireEchoes} echoes)`);
+  check(maxLive <= 1, `never more than one of my shells on screen at once (peak ${maxLive})`);
+  check(spawned === fireEchoes,
+    `every server fire echo adopted a shell instead of spawning one (${spawned} spawned vs ${fireEchoes} echoed)`);
+
+  clearInterval(ka);
+  ws.close();
+  await sim.close();
 }
 
 // Progression is local-only, so its correctness is entirely in this module:
@@ -450,8 +565,8 @@ async function checkCombatRules() {
   g.names.set(2, 'victim');
 
   // last shell of four: the target is on BULLET_DAMAGE hp, so this kills.
-  g.bullets.set(1, { x: 0, y: 0, vx: 0, vy: 0, age: 0, bounces: 0, owner: 1, bornMs: 0, simMs: 0 });
-  g.predictHit(1, false, 50, 50, 2, BULLET_DAMAGE);
+  const shell = g._spawnShell(1, 50, 50, 0, 1, true);
+  g._endShell(shell, 2, BULLET_DAMAGE);
   check(g.effects.some((e) => e.kind === 'explosion'), 'the killing hit explodes immediately, not a round trip later');
   check(g.killBannerAt > 0 && g.events.some((e) => e.kind === 'kill'), 'the kill is credited on the spot');
   check(g.hitstopMs > 0, 'and it lands with hitstop');
@@ -596,6 +711,9 @@ async function main() {
     check(A2.id === 1, 'freed id reused on rejoin');
     A2.close();
     B.close();
+
+    // ---- a real client loop, over a degraded link ----
+    await checkLiveShells(PORT);
   } finally {
     srv.kill();
   }
