@@ -479,6 +479,108 @@ async function checkAdaptiveInterp() {
   }
 }
 
+// Power runes over the real protocol. Kinds cycle deterministically
+// (double -> shield -> powershot), so a scripted match can meet each one.
+// P picks every rune; W (P's teammate) supplies friendly-fire damage for the
+// heal check; V (the enemy) shoots the shield and eats the power shot.
+async function checkPowers() {
+  const { POWER, RUNE_SPOTS, RUNE_PERIOD, POWERSHOT_TOWER_DAMAGE } = await import('../client/shared/protocol.js');
+  const P = new Bot('picker');
+  const V = new Bot('victim');
+  const W = new Bot('wingman');
+  await P.connect('powers');   // team 0
+  await V.connect('powers');   // team 1 (auto-balance)
+  await W.connect('powers');   // team 0
+  await sleep(300);
+
+  // no rune on the field before the first period elapses
+  check(P.snap.rune == null, 'no rune before the first period');
+
+  // W wounds P (friendly fire) so the heal on pickup is observable — exactly ONE
+  // shot: drive() paces on wall time, so a long firing burst lands three shells
+  // and kills P outright, which cascades into every later assertion.
+  await goTo(W, 300, 1030);
+  await W.drive(4, 0, 0, true, Math.PI);
+  await sleep(400);
+  const wounded = P.me().hp;
+  check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
+
+  // ---- rune 1: DOUBLE SHOT ----
+  // park P on the spawn spot; pickup happens the tick after it appears
+  await goTo(P, 170, 512);
+  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
+  let guard = 0;
+  while (P.me().power !== POWER.DOUBLE && guard++ < 60) await P.drive(12, 0, 0);
+  check(P.me().power === POWER.DOUBLE, `rune 1 grants DOUBLE (power ${P.me().power})`);
+  check(P.me().hp === MAX_HP, 'pickup refills health instantly');
+  check(P.ev('rune').some((e) => e.taker === P.id && e.kind === POWER.DOUBLE), 'rune pickup event broadcast');
+
+  // drive() paces on wall time so a "single" burst can span 2 trigger pulls —
+  // assert the INVARIANT instead: every pull while doubled is exactly two fire
+  // events sharing a nonce with subs {0,1}.
+  const firesBefore = P.ev('fire').filter((e) => e.id === P.id).length;
+  await P.drive(20, 0, 0, true, Math.PI);
+  await sleep(300);
+  const volley = P.ev('fire').filter((e) => e.id === P.id).slice(firesBefore);
+  const byNonce = new Map();
+  for (const e of volley) { if (!byNonce.has(e.nonce)) byNonce.set(e.nonce, []); byNonce.get(e.nonce).push(e.sub); }
+  const pairs = [...byNonce.values()];
+  check(volley.length >= 2 && pairs.every((subs) => subs.length === 2 && subs.includes(0) && subs.includes(1)),
+    `DOUBLE fires exactly two shells per trigger pull (${pairs.length} pulls, subs ${JSON.stringify(pairs)})`);
+
+  await sleep(7200);                                // let the power expire
+  check(P.me().power === POWER.NONE, 'a power lapses after 7 seconds');
+
+  // ---- rune 2: SHIELD ----
+  // pre-position the enemy so it can shoot the shield the moment it's up
+  await goTo(V, 550, 512);
+  await goTo(V, 550, 768);
+  await goTo(P, 200, 512);
+  await goTo(P, 200, 768);
+  await goTo(P, RUNE_SPOTS[1].x, RUNE_SPOTS[1].y);
+  guard = 0;
+  while (P.me().power !== POWER.SHIELD && guard++ < 80) await P.drive(12, 0, 0);
+  check(P.me().power === POWER.SHIELD, `rune 2 grants SHIELD (power ${P.me().power})`);
+  const hpShielded = P.me().hp;
+  const bxBefore = V.ev('bx').length;
+  await V.drive(80, 0, 0, true, Math.PI);          // two shots into the bubble
+  await sleep(400);
+  const blockedBx = V.ev('bx').slice(bxBefore).filter((e) => e.hit === P.id && e.blocked);
+  check(blockedBx.length >= 1, `the shield blocks shots (${blockedBx.length} blocked bx)`);
+  check(P.me().hp === hpShielded && P.me().alive, 'and the shielded tank takes zero damage');
+
+  // ---- rune 3: POWER SHOT ----
+  await goTo(V, 550, 600);                          // clear diagonal from the lane
+  await goTo(P, 200, 768);
+  await goTo(P, 200, 512);
+  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
+  guard = 0;
+  while (P.me().power !== POWER.POWERSHOT && guard++ < 80) await P.drive(12, 0, 0);
+  check(P.me().power === POWER.POWERSHOT, `rune 3 grants POWER SHOT (power ${P.me().power})`);
+
+  // Tower first — the drives eat into the 7s window, so spend the charges in the
+  // order that leaves the least slack: two into the RED tower up the left lane...
+  const towerBefore = P.snap.towerHp[1];
+  await goTo(P, 210, 480);
+  const aimT = Math.atan2(135 - P.me().y, 330 - P.me().x);
+  await P.drive(50, 0, 0, true, aimT);             // exactly two trigger pulls
+  await sleep(1000);                                // flight time to the tower
+  const towerAfter = P.snap.towerHp[1];
+  check(towerBefore - towerAfter === 2 * POWERSHOT_TOWER_DAMAGE,
+    `power shots hit the tower for ${POWERSHOT_TOWER_DAMAGE} each (${towerBefore} -> ${towerAfter})`);
+
+  // ...and the last charge one-shots the full-health enemy
+  const vHp = V.me().hp;
+  const aimV = Math.atan2(V.me().y - P.me().y, V.me().x - P.me().x);
+  await P.drive(20, 0, 0, true, aimV);
+  await sleep(600);
+  check(vHp === MAX_HP && !V.me().alive, `a power shot one-shots a full-health tank (was ${vHp}hp)`);
+  check(P.ev('death').some((e) => e.victim === V.id && e.killer === P.id), 'and credits the kill');
+  check(P.me().power === POWER.NONE, 'the third charge spends the power');
+
+  P.close(); V.close(); W.close();
+}
+
 // Progression is local-only, so its correctness is entirely in this module:
 // a non-monotonic curve or a lossy save is invisible until a player loses a level.
 async function checkProfile() {
@@ -908,6 +1010,9 @@ async function main() {
 
     // ---- a real client loop, over a degraded link ----
     await checkLiveShells(PORT);
+
+    // ---- power runes, end to end over the real protocol ----
+    await checkPowers();
   } finally {
     srv.kill();
   }

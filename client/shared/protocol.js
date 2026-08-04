@@ -63,6 +63,27 @@ export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank cente
 export const RESPAWN_DELAY = 2.5;       // seconds
 export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 
+// ---- Power runes ----
+// A rune appears near mid-arena every RUNE_PERIOD seconds; driving over it grants
+// a power for POWER_DURATION seconds and refills health instantly. Kinds CYCLE
+// (double -> shield -> power shot) rather than roll randomly: every match sees
+// every power, both teams can plan around what comes next, and tests are
+// deterministic. Everything here is server-authoritative — the client only
+// renders what the snapshot/events say.
+export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3 };
+export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT'];
+export const RUNE_PERIOD = 10;          // s from spawn/claim to the next rune
+export const POWER_DURATION = 7;        // s a claimed power lasts
+export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)
+export const POWER_SHOTS = 3;           // powershot grants this many shells...
+export const POWERSHOT_TOWER_DAMAGE = 140; // ...each one-shots a tank, and hits
+                                        // the tower for 4x a normal shell
+export const DOUBLE_SPREAD = 0.07;      // rad between the two barrels of a double
+// The exact arena centre sits INSIDE the center obstacle, so the rune alternates
+// between the two open pockets just above and below it — mirrored, so neither
+// team owns the spawn.
+export const RUNE_SPOTS = [{ x: 360, y: 512 }, { x: 360, y: 768 }];
+
 // ---- Teams ----
 export const TEAM_COUNT = 2;            // 0 = BLUE (bottom half), 1 = RED (top half)
 export const TEAM_NAMES = ['BLUE', 'RED'];
@@ -171,16 +192,20 @@ export function decodePong(v) {
 }
 
 // ---- SNAPSHOT: s->c ----
-// header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count][u16 towerHp0][u16 towerHp1]
-//         (13 bytes)
+// header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count][u16 towerHp0][u16 towerHp1][u8 rune]
+//         (14 bytes)
+// rune: 0 = none on the field, else (kind 1..3) | (spot index << 4) — position is
+// derived from RUNE_SPOTS, so presence costs one byte and survives mid-match joins
+// (an event alone would be missed by anyone who connected after it fired).
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
-// flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7). All three ride in the
-// spare bits of one byte, so teams and ammo cost 0 extra bytes per tank on the
-// 60 Hz hot path — and ammo stays authoritative rather than client-guessed.
+// flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7), bits5-6 = active power
+// (POWER.*). All of it rides in the spare bits of one byte, so teams, ammo and
+// powers cost 0 extra bytes per tank on the 60 Hz hot path — and every one of
+// them stays authoritative rather than client-guessed.
 const TANK_BYTES = 14;
-const SNAP_HEADER = 13;
-export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
+const SNAP_HEADER = 14;
+export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 0) {
   const buf = new ArrayBuffer(SNAP_HEADER + tanks.length * TANK_BYTES);
   const v = new DataView(buf);
   v.setUint8(0, MSG.SNAPSHOT);
@@ -190,6 +215,7 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
   v.setUint8(8, tanks.length);
   v.setUint16(9, Math.max(0, Math.min(65535, Math.round(towerHp[0] || 0))), true);
   v.setUint16(11, Math.max(0, Math.min(65535, Math.round(towerHp[1] || 0))), true);
+  v.setUint8(13, rune & 0xff);
   let o = SNAP_HEADER;
   for (const t of tanks) {
     v.setUint8(o, t.id);
@@ -200,7 +226,8 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp) {
     v.setUint8(o + 9, encAngle8(t.hull));
     v.setUint8(o + 10, encAngle8(t.turret));
     v.setUint8(o + 11, Math.max(0, Math.min(255, t.hp)));
-    v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1) | ((Math.min(7, t.ammo ?? MAG_SIZE) & 7) << 2));
+    v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1)
+      | ((Math.min(7, t.ammo ?? MAG_SIZE) & 7) << 2) | ((t.power ?? 0) << 5));
     v.setUint8(o + 13, Math.min(255, t.score));
     o += TANK_BYTES;
   }
@@ -212,6 +239,10 @@ export function decodeSnapshot(v /* DataView */) {
   const yourId = v.getUint8(7);
   const count = v.getUint8(8);
   const towerHp = [v.getUint16(9, true), v.getUint16(11, true)];
+  const runeByte = v.getUint8(13);
+  const rune = runeByte
+    ? { kind: runeByte & 0x0f, ...RUNE_SPOTS[(runeByte >> 4) & 1] }
+    : null;
   const tanks = [];
   let o = SNAP_HEADER;
   for (let i = 0; i < count; i++) {
@@ -227,9 +258,10 @@ export function decodeSnapshot(v /* DataView */) {
       alive: (v.getUint8(o + 12) & 1) !== 0,
       team: (v.getUint8(o + 12) >> 1) & 1,
       ammo: (v.getUint8(o + 12) >> 2) & 7,
+      power: (v.getUint8(o + 12) >> 5) & 3,
       score: v.getUint8(o + 13),
     });
     o += TANK_BYTES;
   }
-  return { tick, lastAckSeq, yourId, tanks, towerHp };
+  return { tick, lastAckSeq, yourId, tanks, towerHp, rune };
 }

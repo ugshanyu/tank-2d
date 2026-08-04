@@ -411,10 +411,32 @@ export class Renderer {
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
+    // Power rune — a pulsing pickup circle with the kind's glyph. Rendered from
+    // the snapshot byte, so it is exactly as present as the server says.
+    if (state.rune) {
+      const pulse = 1 + 0.08 * Math.sin(now / 220);
+      const r = state.rune;
+      ctx.save();
+      ctx.translate(r.x, r.y);
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#ffd76e';
+      ctx.beginPath(); ctx.arc(0, 0, 30 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#ffd76e';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff3cf';
+      ctx.font = 'bold 19px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(['', '×2', '◈', '★'][r.kind] || '?', 0, 1);
+      ctx.restore();
+    }
+
     // remote tanks — bar shows the eased display hp (authoritative underneath)
     for (const t of state.others) {
       if (!t.alive) continue;
       this._tank(t.x, t.y, t.hull, t.turret, t.team, t.name, t.dispHp ?? t.hp, false);
+      if (t.power === 2) this._shield(t.x, t.y, now);
     }
     // Aim ray. Direct-touch aiming means a ~45px fingertip sits on top of a 31px
     // enemy sprite — you cannot see the thing you are shooting at. The ray shows
@@ -447,6 +469,18 @@ export class Renderer {
         state.myTeam, state.meName, state.myHp ?? state.me.hp ?? MAX_HP, true, recoil, state.reload ?? 1,
         state.ammo ?? MAG_SIZE, !!state.reloading,
       );
+      if (state.myPower === 2) this._shield(state.mePos.x, state.mePos.y, now);
+      // power countdown: a golden arc that empties over the 7 seconds
+      if (state.myPower > 0 && state.myPowerFrac > 0) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,215,110,0.9)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(state.mePos.x, state.mePos.y, TANK_RADIUS + 16,
+          -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * state.myPowerFrac);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Shells. At fit-to-arena zoom a shell was a 4px dot moving 218 screen px/s —
@@ -459,11 +493,17 @@ export class Renderer {
       // drawn barrel during a correction; eases to zero over the first frames
       const bx = b.x + (b.drawOffX || 0), by = b.y + (b.drawOffY || 0);
       const tx = bx - b.vx * 0.045, ty = by - b.vy * 0.045;
-      ctx.strokeStyle = mine ? 'rgba(255,230,150,0.45)' : 'rgba(255,150,110,0.45)';
-      ctx.lineWidth = 3.5;
+      const R = b.isPower ? shellR * 1.9 : shellR;
+      ctx.strokeStyle = b.isPower ? 'rgba(255,120,220,0.6)'
+        : mine ? 'rgba(255,230,150,0.45)' : 'rgba(255,150,110,0.45)';
+      ctx.lineWidth = b.isPower ? 6 : 3.5;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by); ctx.stroke();
-      ctx.fillStyle = mine ? '#ffe796' : '#ff9d6e';
-      ctx.beginPath(); ctx.arc(bx, by, shellR, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = b.isPower ? '#ff9bf0' : mine ? '#ffe796' : '#ff9d6e';
+      ctx.beginPath(); ctx.arc(bx, by, R, 0, Math.PI * 2); ctx.fill();
+      if (b.isPower) {
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(bx, by, R * 0.45, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     // Particles render OVER the tanks: a 14-screen-px spark under a 28px sprite
@@ -733,6 +773,20 @@ export class Renderer {
       ctx.strokeStyle = '#8be9fd';
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 40 * f, 0, Math.PI * 2); ctx.stroke();
+    } else if (e.kind === 'deflect') {
+      // shell died on a shield: a cyan arc flash, pointedly NOT a damage effect
+      ctx.globalAlpha = 1 - f;
+      ctx.strokeStyle = '#8be9fd';
+      ctx.lineWidth = 4 * (1 - f) + 1;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 16 + 18 * ease(f), 0, Math.PI * 2); ctx.stroke();
+    } else if (e.kind === 'powerup') {
+      // rune claimed: golden burst
+      ctx.globalAlpha = 1 - f;
+      ctx.strokeStyle = '#ffd76e';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 55 * ease(f), 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = `rgba(255,215,110,${0.35 * (1 - f)})`;
+      ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 40 * ease(f), 0, Math.PI * 2); ctx.fill();
     } else if (e.kind === 'confirm') {
       // Server-confirmed hitmarker: four ticks + a floating damage number. The
       // ONE symbol in the game that only ever appears when damage really landed.
@@ -752,8 +806,21 @@ export class Renderer {
       ctx.font = 'bold 17px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffe796';
-      ctx.fillText(`-${e.dmg ?? ''}`, 0, -22 - 16 * ease(f));
+      ctx.fillText(typeof e.dmg === 'string' ? e.dmg : `-${e.dmg ?? ''}`, 0, -22 - 16 * ease(f));
     }
+    ctx.restore();
+  }
+
+  // The shield bubble — drawn on ANY tank whose snapshot power bit says so.
+  _shield(x, y, now) {
+    const { ctx } = this;
+    const pulse = 1 + 0.05 * Math.sin(now / 130);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(139,233,253,0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(x, y, (TANK_RADIUS + 9) * pulse, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(139,233,253,0.10)';
+    ctx.fill();
     ctx.restore();
   }
 }

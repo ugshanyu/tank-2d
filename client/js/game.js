@@ -21,6 +21,7 @@ import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
   RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, TOWER_OWNER_BASE,
   TANK_RADIUS, BULLET_RADIUS, TOWER_RADIUS,
+  POWER, POWER_DURATION, DOUBLE_SPREAD,
   wrapAngle, encAngle16, decAngle16,
 } from '../shared/protocol.js';
 import { stepTank, stepBullet, TOWERS } from '../shared/sim.js';
@@ -88,6 +89,10 @@ export class Game {
     this.effects = [];            // {kind,x,y,born,dur,r}
     this.aim = 0;
     this.respawnCountdown = 0;
+
+    // power rune on the field (authoritative, straight from the snapshot byte)
+    this.rune = null;             // {kind, x, y} | null
+    this.myPowerUntil = 0;        // local clock estimate for the HUD countdown ring
 
     // pooled per-frame output (this path runs every frame for every tank)
     this._remoteOut = [];
@@ -207,14 +212,21 @@ export class Game {
   // exception is static geometry — walls and towers don't move, so the client's
   // verdict on them is the server's verdict, and it plays with full confidence.
   // The dead shell stays in the map so the echo lands on it and stays silent.
-  _endShell(s, victimId) {
+  _endShell(s, victimId, shielded = false) {
     if (s.dead) return;
     s.dead = true;
     s.deadAt = performance.now();
     s.hitId = victimId || 0;
+    s.blocked = shielded;
     s.hitTower = victimId ? -1 : nearestTower(s.x, s.y);
 
     if (victimId) {
+      if (shielded) {
+        // the bubble ate it: deflection flash + clang, no hurt, no damage story
+        this.effects.push({ kind: 'deflect', x: s.x, y: s.y, born: s.deadAt, dur: 300 });
+        this.events.push({ kind: 'bounce', key: s.key, x: s.x });
+        return;
+      }
       this.effects.push({ kind: 'hit', x: s.x, y: s.y, born: s.deadAt, dur: 450 });
       const mine = victimId === this.myId;
       if (mine) this._selfFeedbackAt = s.deadAt;
@@ -259,21 +271,24 @@ export class Game {
   resolveHits(others, renderMs) {
     for (const s of this.shells.values()) {
       if (s.dead) continue;
-      let hitId = 0;
+      let hitId = 0, shielded = false;
       for (const t of others) {
         if (!t.alive || t.id === s.owner) continue;
         // RAW interpolated position, not the smoothed one: the server rewinds to
         // raw history, and testing against x+errX disagreed with it by up to
         // MAX_ERR px during exactly the corrections that matter.
-        if (segPointDist(s.prevX, s.prevY, s.x, s.y, t.rawX ?? t.x, t.rawY ?? t.y) < HIT_RADIUS) { hitId = t.id; break; }
+        if (segPointDist(s.prevX, s.prevY, s.x, s.y, t.rawX ?? t.x, t.rawY ?? t.y) < HIT_RADIUS) {
+          hitId = t.id; shielded = t.power === POWER.SHIELD; break;
+        }
       }
       if (!hitId && !s.mine && this.meServer && this.meServer.alive) {
         const past = this.meAt(renderMs);
         if (past && segPointDist(s.prevX, s.prevY, s.x, s.y, past.x, past.y) < HIT_RADIUS) {
           hitId = this.myId;
+          shielded = this.meServer.power === POWER.SHIELD;
         }
       }
-      if (hitId) this._endShell(s, hitId);
+      if (hitId) this._endShell(s, hitId, shielded);
     }
   }
 
@@ -359,16 +374,27 @@ export class Game {
     // than the player watched. The muzzle flash and the first frames of the
     // tracer still DRAW from the barrel: the offset rides on the shell as a
     // cosmetic delta and eases out in flight.
-    const x = this.me.x + Math.cos(a) * MUZZLE_OFFSET;
-    const y = this.me.y + Math.sin(a) * MUZZLE_OFFSET;
-    this.shake = Math.max(this.shake, 2.5);
+    // Powers change what leaves the barrel, and the client KNOWS its own power
+    // (authoritative flag bits) — so prediction fires the same pattern the
+    // server will: two fanned shells on DOUBLE, one heavy shell on POWERSHOT.
+    const myPower = this.meServer ? this.meServer.power : POWER.NONE;
+    const angles = myPower === POWER.DOUBLE
+      ? [a - DOUBLE_SPREAD / 2, a + DOUBLE_SPREAD / 2]
+      : [a];
+    const isPower = myPower === POWER.POWERSHOT;
+    this.shake = Math.max(this.shake, isPower ? 5 : 2.5);
     this.lastFireAt = performance.now();
-    this.events.push({ kind: 'fire', key: this.myId, x: x + this.errX });
-    const s = this._spawnShell(`n${nonce}`, x, y, a, this.myId, false);
-    s.drawOffX = this.errX; s.drawOffY = this.errY;
-    this.effects.push({
-      kind: 'muzzle', x: x + this.errX, y: y + this.errY, a,
-      born: performance.now(), dur: 90,
+    angles.forEach((aa, sub) => {
+      const x = this.me.x + Math.cos(aa) * MUZZLE_OFFSET;
+      const y = this.me.y + Math.sin(aa) * MUZZLE_OFFSET;
+      if (sub === 0) this.events.push({ kind: 'fire', key: this.myId, x: x + this.errX });
+      const s = this._spawnShell(sub ? `n${nonce}s1` : `n${nonce}`, x, y, aa, this.myId, false);
+      s.drawOffX = this.errX; s.drawOffY = this.errY;
+      s.isPower = isPower;
+      this.effects.push({
+        kind: 'muzzle', x: x + this.errX, y: y + this.errY, a: aa,
+        born: performance.now(), dur: 90,
+      });
     });
   }
 
@@ -376,6 +402,7 @@ export class Game {
   onSnapshot(snap) {
     if (!this.myId) return;
     if (snap.towerHp) this.towerHp = snap.towerHp;
+    this.rune = snap.rune ?? null;
     const tMs = snap.tick * DT * 1000;
 
     for (const t of snap.tanks) {
@@ -546,20 +573,24 @@ export class Game {
         // pull": the old code only adopted a shell that was still ALIVE, so any
         // shot that had already hit a wall got re-created at the muzzle and flew
         // the entire path again.
-        const mineKey = `n${msg.nonce}`;
+        // `sub` distinguishes the two shells of a DOUBLE (0 = first, 1 = second)
+        const mineKey = msg.sub ? `n${msg.nonce}s1` : `n${msg.nonce}`;
         if (msg.id === this.myId && this.shells.has(mineKey)) {
           const s = this.shells.get(mineKey);
           this.shells.delete(mineKey);
           s.key = msg.bid;
           s.confirmed = true;
+          s.isPower = !!msg.power;
           this.shells.set(msg.bid, s);
           break;
         }
         if (msg.id === this.myId) break;   // my shot, already spent and purged
+        // (or a power desync around expiry: the bx fallback still shows its impact)
 
         // Remote shot. It was fired `age` ago on the render timeline, so catch it
         // up to now in one go rather than parking it on a per-bullet cursor.
         const s = this._spawnShell(msg.bid, msg.x, msg.y, msg.a, msg.id, true);
+        s.isPower = !!msg.power;
         const ageMs = this.net.serverNowMs() - this.net.interpDelayMs() - msg.tick * DT * 1000;
         if (ageMs > 0 && !this._advance(s, Math.min(ageMs, 400) / 1000)) this._endShell(s, 0);
         this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
@@ -588,8 +619,13 @@ export class Game {
 
         // Confirm beat: the server ruled MY shell hit an enemy. This is the moment
         // damage became real, so the hitmarker and damage number live here.
-        if (mine && msg.hit && msg.hit !== this.myId) {
-          this.effects.push({ kind: 'confirm', x: ex, y: ey, born: now, dur: 400, dmg: BULLET_DAMAGE });
+        // A SHIELDED hit dealt nothing — no marker, no number; the deflect below
+        // tells that story instead.
+        if (mine && msg.hit && msg.hit !== this.myId && !msg.blocked) {
+          this.effects.push({
+            kind: 'confirm', x: ex, y: ey, born: now, dur: 400,
+            dmg: msg.power ? 'KILL' : BULLET_DAMAGE,
+          });
           this.events.push({ kind: 'confirm', key: msg.hit, x: ex });
         }
         // Tower damage credit — authoritative; skip if already tallied at contact.
@@ -601,7 +637,14 @@ export class Game {
         // the same story. hitTower === -2 means we retired silently near a tank
         // (ambiguous) — contact never played, so the echo speaks in full.
         const played = !!(s && s.dead && s.hitTower !== -2);
-        if (played && msg.hit === s.hitId && tower === s.hitTower) break;
+        if (played && msg.hit === s.hitId && tower === s.hitTower
+            && !!msg.blocked === !!s.blocked) break;
+        if (msg.blocked) {
+          // shield deflection: the shell died on the bubble, nobody got hurt
+          this.effects.push({ kind: 'deflect', x: ex, y: ey, born: now, dur: 300 });
+          this.events.push({ kind: 'bounce', key: msg.bid, x: ex });
+          break;
+        }
         this.effects.push({
           kind: msg.hit ? 'hit' : 'poof',
           x: ex, y: ey, born: now, dur: msg.hit ? 450 : 250,
@@ -676,6 +719,12 @@ export class Game {
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
       }
+      case 'rune':
+        // somebody claimed the rune: flash + sound for everyone, countdown for me
+        this.effects.push({ kind: 'powerup', x: msg.x, y: msg.y, born: performance.now(), dur: 600 });
+        this.events.push({ kind: 'powerup', key: msg.taker, x: msg.x });
+        if (msg.taker === this.myId) this.myPowerUntil = performance.now() + POWER_DURATION * 1000;
+        break;
     }
   }
 
@@ -801,6 +850,7 @@ export class Game {
       if (st.dispHp === undefined || !b.alive) st.dispHp = b.hp;
       else st.dispHp += (b.hp - st.dispHp) * (1 - Math.exp(-dtSec / HP_SMOOTH_S));
       st.alive = b.alive;
+      st.power = b.power ?? 0;
       st.score = b.score; st.team = b.team;
       st.name = this.names.get(id) || '?';
       out.push(st);

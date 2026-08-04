@@ -166,6 +166,10 @@ export class Sfx {
       case 'spawn':
         this._tone({ type: 'triangle', f0: 300, f1: 900, dur: 0.18, gain: 0.22, attack: 0.02 });
         break;
+      case 'powerup':                               // rune claimed
+        this._tone({ type: 'triangle', f0: 500, f1: 1000, dur: 0.12, gain: 0.3, pan: p, attack: 0.005 });
+        this._tone({ type: 'triangle', f0: 750, f1: 1500, dur: 0.16, gain: 0.26, pan: p, delay: 0.08 });
+        break;
       case 'win':
         [523, 659, 784, 1046].forEach((f, i) =>
           this._tone({ type: 'triangle', f0: f, dur: 0.28, gain: 0.28, delay: i * 0.09, attack: 0.02 }));
@@ -182,7 +186,7 @@ export class Sfx {
 // substitute there — but it lands on Android and in several WebViews.
 const HAPTIC = {
   fire: 12, hit: 18, confirm: 14, hurt: 35, kill: [0, 18, 40, 18],
-  death: 90, towerhit: 20, win: [0, 60, 50, 120], lose: 140,
+  death: 90, towerhit: 20, powerup: [0, 20, 30, 20], win: [0, 60, 50, 120], lose: 140,
 };
 let lastBuzz = -1e9;
 export function haptic(kind) {

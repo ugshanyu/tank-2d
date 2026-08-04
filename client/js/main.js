@@ -6,7 +6,7 @@
 import { SERVICE_ID, devServerUrl, devRoomId } from './config.js';
 import {
   DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, TEAM_NAMES, TOWER_HP, MATCH_RESET_DELAY,
-  MAX_HP, MAG_SIZE,
+  MAX_HP, MAG_SIZE, POWER_NAMES,
 } from '../shared/protocol.js';
 import { Net } from './net.js';
 import { Input } from './input.js';
@@ -323,6 +323,7 @@ function startNet(resolveUrl) {
       if (m.t === 'death' && m.victim !== game.myId && m.killer === game.myId
           && (game.teams.get(m.victim) ?? 0) !== game.myTeam) toast('Kill! +1', 1200);
       if (m.t === 'matchstart') toast('New match — go!', 1600);
+      if (m.t === 'rune' && m.taker === game.myId) toast(`${POWER_NAMES[m.kind]}!`, 1800);
       if (m.t === 'error') toast(m.reason, 4000);
     },
     onStatus: (s, reason) => {
@@ -421,6 +422,10 @@ function startNet(resolveUrl) {
     drawState.myTeam = game.myTeam;
     drawState.towerHp = game.towerHp;
     drawState.towers = game.towerState;
+    drawState.rune = game.rune;
+    drawState.myPower = game.meServer ? game.meServer.power : 0;
+    drawState.myPowerFrac = drawState.myPower
+      ? Math.max(0, Math.min(1, (game.myPowerUntil - performance.now()) / 7000)) : 0;
     drawState.others = game.remoteStates(renderMs, dt || 1 / 60);
     // Resolve every shell against exactly the tanks being drawn this frame, then
     // hand the survivors to the renderer. Impact lands the instant it connects on
