@@ -863,6 +863,27 @@ async function checkTilt() {
   await settle(input._beta0 - 20);
   check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
 
+  // ---- tilt must engage with NO gesture whatsoever ----
+  // The orientation listener is attached at construction, so on any platform
+  // without iOS's permission gate the first sensor reading is enough. This
+  // instance never calls requestTilt() — it stands in for a player who has not
+  // touched the screen at all.
+  const auto = new Input(el());
+  check(auto.mode === 'stick',
+    'starts on the stick fallback, so the tank is drivable before the sensor reports');
+  check(auto.needsTiltPrompt() === false,
+    'no permission modal is pending on a platform without the iOS gate');
+  emit(24, 0);
+  check(auto.tiltReady === true, 'a sensor reading with NO gesture still readies tilt');
+  check(auto.mode === 'tilt', 'and tilt takes over without the player tapping anything');
+
+  // ...but where iOS's gate exists, a gesture genuinely is required, and the
+  // first tap is reserved for the modal rather than being spent as a shot.
+  DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted');
+  const ios = new Input(el());
+  check(ios.needsTiltPrompt() === true, 'the iOS permission gate is still detected as needing a tap');
+  delete DeviceOrientationEvent.requestPermission;
+
   // ---- desktop: WASD/arrows must steer ----
   // The keyboard path had no coverage at all, and it is the ONLY way to drive on
   // web. Two things it has to survive: a physical-position `code` (the normal

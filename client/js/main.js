@@ -123,7 +123,11 @@ function armFirstGesture() {
     window.removeEventListener('click', fire, true);
 
     sfx.unlock();   // AudioContext can only start inside a gesture
-    input.suppressNextPointer = true;   // this tap opens a modal; it is not a shot
+    // Only swallow the tap when it will genuinely open the iOS motion modal.
+    // Doing it unconditionally ate the first shot on Android and in WebViews,
+    // where no prompt ever appears — and now that tilt attaches at startup,
+    // those platforms are usually already steering by this point.
+    input.suppressNextPointer = input.needsTiltPrompt();
 
     const tilt = await input.requestTilt();
     if (tilt === 'granted' && input.mode === 'tilt') {
@@ -189,8 +193,12 @@ function openSheet(open) {
   syncSheet();
 }
 function syncSheet() {
-  EL.optStick.classList.toggle('sel', input.mode !== 'tilt');
-  EL.optTilt.classList.toggle('sel', input.mode === 'tilt');
+  // Show the PREFERENCE, not the transient mode. `mode` is 'stick' until a real
+  // sensor reading lands, so keying off it made the sheet report "Joystick" to
+  // every player whose phone had simply not reported yet — the setting looked
+  // changed when nothing had changed.
+  EL.optStick.classList.toggle('sel', !input.prefersTilt);
+  EL.optTilt.classList.toggle('sel', input.prefersTilt);
   EL.optTilt.disabled = !input.tiltSupported();
   EL.optSound.textContent = sfx.muted ? 'Off' : 'On';
   EL.optHaptics.textContent = hapticsOn ? 'On' : 'Off';

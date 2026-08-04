@@ -73,6 +73,13 @@ export class Input {
     this._keys = new Set();
 
     this._attach();
+    // Listen for orientation from the very first frame, NOT from the first tap.
+    // Attaching costs nothing and asks for nothing: on Android, in a WebView, and
+    // anywhere without iOS's permission gate, readings start arriving at once and
+    // tilt engages before the player touches the screen. It used to be attached
+    // only inside requestTilt(), so every platform paid for iOS's restriction and
+    // the game sat on the joystick until something was tapped.
+    if (this.prefersTilt) this._attachOrientation();
   }
 
   // ONE persistent orientation listener, attached once and never torn down.
@@ -158,6 +165,15 @@ export class Input {
   // all, rather than whether it has already succeeded.
   tiltSupported() {
     return typeof DeviceOrientationEvent !== 'undefined';
+  }
+
+  // Will the next gesture actually raise a permission modal? Only iOS 13+ gates
+  // motion behind one. Everywhere else the first tap should be an ordinary shot
+  // rather than being swallowed for a prompt that never appears.
+  needsTiltPrompt() {
+    return !this.tiltReady
+      && typeof DeviceOrientationEvent !== 'undefined'
+      && typeof DeviceOrientationEvent.requestPermission === 'function';
   }
 
   // Switching control scheme mid-match must cancel any stick the thumb is holding,
