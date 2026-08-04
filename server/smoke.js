@@ -552,6 +552,35 @@ async function checkTilt() {
   await settle(neutral - 20);
   check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
 
+  // ---- desktop: WASD/arrows must steer ----
+  // The keyboard path had no coverage at all, and it is the ONLY way to drive on
+  // web. Two things it has to survive: a physical-position `code` (the normal
+  // case, and what keeps WASD under the same fingers on AZERTY), and an event
+  // that carries only `key` with `code` empty — synthetic, remote-desktop and
+  // on-screen keyboards do that, and steering used to silently do nothing.
+  const kb = new Input(el());
+  kb.setMode('stick');
+  const press = (ev) => { for (const fn of listeners.get('keydown') || []) fn({ preventDefault() {}, ...ev }); };
+  const release = (ev) => { for (const fn of listeners.get('keyup') || []) fn({ ...ev }); };
+  const drive = (ev) => { press(ev); kb.poll(); const r = { x: kb.moveX, y: kb.moveY }; release(ev); kb.poll(); return r; };
+
+  const d = drive({ code: 'KeyD', key: 'd' });
+  check(d.x === 1 && d.y === 0, `D drives right (${d.x},${d.y})`);
+  const w = drive({ code: 'KeyW', key: 'w' });
+  check(w.y === -1, `W drives up (${w.x},${w.y})`);
+  const a = drive({ code: 'KeyA', key: 'a' });
+  check(a.x === -1, `A drives left (${a.x},${a.y})`);
+  const arrow = drive({ code: 'ArrowDown', key: 'ArrowDown' });
+  check(arrow.y === 1, `arrow keys work too (${arrow.x},${arrow.y})`);
+  check(kb.moveX === 0 && kb.moveY === 0, 'releasing every key stops the tank');
+
+  const noCode = drive({ code: '', key: 'd' });
+  check(noCode.x === 1, `a keydown with no \`code\` still steers (${noCode.x},${noCode.y})`);
+  press({ code: '', key: ' ' });
+  check(kb._keys.has('Space'), 'and space still fires when it arrives without a code');
+  release({ code: '', key: ' ' });
+  check(!kb._keys.has('Space'), 'the matching keyup releases it (no stuck trigger)');
+
   delete globalThis.window; delete globalThis.matchMedia;
   delete globalThis.screen; delete globalThis.DeviceOrientationEvent;
 }

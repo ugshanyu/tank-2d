@@ -26,7 +26,7 @@ for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrat
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
-                  'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
+                  'introAim', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
                   'matchCard', 'stKills', 'stDeaths', 'stTower', 'xpLevel', 'xpGain', 'xpFill']) {
   EL[id] = document.getElementById(id);
 }
@@ -242,11 +242,21 @@ function wireUi() {
 // single most disorienting thing about this game. Shown once, recallable from
 // settings. The match runs underneath — this never blocks or pauses anyone else.
 function showIntro() {
-  // On a phone tilt is the default, but permission is not granted until the first
-  // touch — so key the copy off the PREFERENCE, not the mode we're in right now.
-  EL.introDrive.textContent = (input.mode === 'tilt' || (input.prefersTilt && input.isTouch))
-    ? 'Tilt your phone to drive.'
-    : 'Drag the left side to drive.';
+  // Desktop has always steered with WASD/arrows and aimed with the mouse, but the
+  // intro only ever described the touch controls — so on web the game read as
+  // "drag the left side", which does nothing with a mouse, and the keyboard went
+  // undiscovered. Say what actually works on the device you are on.
+  if (!input.isTouch) {
+    EL.introDrive.textContent = 'WASD or the arrow keys to drive.';
+    EL.introAim.textContent = 'Aim with the mouse. Click or press space to fire.';
+  } else {
+    // On a phone tilt is the default, but permission is not granted until the first
+    // touch — so key the copy off the PREFERENCE, not the mode we're in right now.
+    EL.introDrive.textContent = (input.mode === 'tilt' || input.prefersTilt)
+      ? 'Tilt your phone to drive.'
+      : 'Drag the left side to drive.';
+    EL.introAim.textContent = 'Touch the right side to aim and shoot.';
+  }
   EL.intro.classList.add('on');
 }
 function maybeShowIntro() {

@@ -172,14 +172,24 @@
     max-width: 280px; text-align: center; line-height: 1.4; }
   #offline.fatal { background: rgba(6,10,18,.88); }
 
-  /* The arena is 9:16. In landscape the fit-to-height zoom renders it as a ~220px
-     sliver in the middle of the screen, and the tilt axis mapping flips under the
-     player mid-match. Declare portrait and mean it. */
+  /* The arena is 9:16. On a PHONE held sideways the fit-to-height zoom renders it
+     as a ~220px sliver and the tilt axis mapping flips under the player mid-match,
+     so there we declare portrait and mean it.
+
+     A desktop browser is a different case entirely and must NOT be caught by this:
+     its window is landscape by definition, there is nothing to rotate, and the
+     fit-to-height letterbox is perfectly playable (a 900px-tall window gives a
+     506px-wide arena, not a sliver). Gating on orientation alone made the game
+     unreachable on web — you got this overlay and never saw the arena.
+     `hover: none and pointer: coarse` is the touch-only test; a touchscreen
+     laptop reports hover:hover and keeps the game. */
   #rotate { position: fixed; inset: 0; z-index: 10; display: none; flex-direction: column;
     align-items: center; justify-content: center; gap: 14px; background: #0b0e14;
     text-align: center; font-size: 17px; letter-spacing: 1px; color: #cfe3ff; }
   #rotate span { font-size: 44px; }
-  @media (orientation: landscape) { #rotate { display: flex; } }
+  @media (orientation: landscape) and (hover: none) and (pointer: coarse) {
+    #rotate { display: flex; }
+  }
 </style>
 </head>
 <body>
@@ -235,7 +245,7 @@
   <h1>TANK</h1>
   <div class="steps">
     <div class="step"><b>1</b><span id="introDrive">Drag the left side to drive.</span></div>
-    <div class="step"><b>2</b><span>Touch the right side to aim and shoot.</span></div>
+    <div class="step"><b>2</b><span id="introAim">Touch the right side to aim and shoot.</span></div>
     <div class="step"><b>3</b><span>Destroy the enemy tower to win. It shoots back.</span></div>
   </div>
   <button class="go" id="introGo">PLAY</button>

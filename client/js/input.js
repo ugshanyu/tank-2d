@@ -306,11 +306,24 @@ export class Input {
       window.addEventListener('orientationchange', onOrient);
     }
 
+    // `code` is deliberately primary: it is the PHYSICAL key position, so WASD
+    // stays under the same fingers on AZERTY/QWERTZ where `key` would report z/q.
+    // But not every source populates it — synthetic events, some remote-desktop
+    // and on-screen keyboards, and automation deliver `key` with `code` empty,
+    // and then steering silently does nothing at all. Fall back rather than drop.
+    const codeOf = (e) => {
+      if (e.code) return e.code;
+      const k = e.key;
+      if (!k) return '';
+      if (k === ' ' || k === 'Spacebar') return 'Space';
+      return k.length === 1 ? `Key${k.toUpperCase()}` : k;
+    };
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'Space') e.preventDefault();
-      this._keys.add(e.code);
+      const code = codeOf(e);
+      if (code === 'Space') e.preventDefault();
+      this._keys.add(code);
     });
-    window.addEventListener('keyup', (e) => this._keys.delete(e.code));
+    window.addEventListener('keyup', (e) => this._keys.delete(codeOf(e)));
     window.addEventListener('blur', () => { this._keys.clear(); this._mouseDown = false; this._firePointers.clear(); this.joy = null; });
     c.addEventListener('contextmenu', (e) => e.preventDefault());
   }
