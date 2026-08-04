@@ -38,9 +38,19 @@ export const BULLET_MAX_BOUNCES = 0;    // no ricochet: a shell dies on the firs
                                         // arrive from directions nobody aimed
                                         // from, which reads as random at
                                         // 1750 px/s.
-export const BULLET_DAMAGE = 28;        // 4 shells to kill
+export const BULLET_DAMAGE = 34;        // 3 shells to kill. Raised from 28 (4 shells)
+                                        // when FIRE_COOLDOWN went to 1s: at one shot a
+                                        // second, four shells meant 5s of landing every
+                                        // single hit on a moving target, and duels
+                                        // stopped resolving. Three keeps a fight
+                                        // decidable without making a shot cheap.
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
-export const FIRE_COOLDOWN = 0.16;      // s between shots inside a magazine (~6/s)
+export const FIRE_COOLDOWN = 1.0;       // s between shots. One shot per second makes
+                                        // every trigger pull a decision you commit to
+                                        // rather than a stream you hose around — but
+                                        // it is a HARD balance lever: see TOWER_HP and
+                                        // MAG_SIZE below, both of which were sized
+                                        // against the old ~6 shots/s.
 // Magazine: five fast shots, then a real reload. The pause is what gives the
 // volley a shape — without it, held fire is an undifferentiated stream.
 export const MAG_SIZE = 5;

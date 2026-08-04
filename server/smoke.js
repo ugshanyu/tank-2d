@@ -9,7 +9,15 @@ import WebSocket from 'ws';
 import {
   MSG, DT, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
   TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS,
+  FIRE_COOLDOWN, MAG_SIZE, RELOAD_TIME, RESPAWN_DELAY,
 } from '../client/shared/protocol.js';
+
+// How long a sustained siege actually takes, DERIVED rather than hard-coded — a
+// fixed step budget silently becomes a timeout the moment the fire rate changes,
+// which is exactly what happened when FIRE_COOLDOWN went from 0.16s to 1s.
+// Per shell: the cooldown, plus the reload amortised across a magazine.
+const SECONDS_PER_SHELL = FIRE_COOLDOWN + RELOAD_TIME / MAG_SIZE;
+const shellSeconds = (shells) => shells * SECONDS_PER_SHELL;
 
 const PORT = 8123;       // deterministic scripted match — bots disabled
 const BOT_PORT = 8124;   // second instance with bots on
@@ -692,8 +700,10 @@ async function main() {
     // ---- fire until B dies (3 hits needed) ----
     const aim = Math.atan2(bPos.y - aPos.y, bPos.x - aPos.x);
     const kills0 = A.me().score;
+    // shells to kill, doubled for the ones that clip a wall on the way
+    const killBudgetMs = shellSeconds(2 * Math.ceil(MAX_HP / BULLET_DAMAGE)) * 1000 + 4000;
     let waited = 0;
-    while (B.me().alive && waited < 8000) {
+    while (B.me().alive && waited < killBudgetMs) {
       await A.drive(4, 0, 0, true, aim);
       waited += 4 * DT * 1000;
     }
@@ -716,8 +726,13 @@ async function main() {
     // tower shoots back, so A trades lives for damage — the intended loop.
     // B stays parked at its top-right spawn, out of both towers' range.
     const RED = 1;
+    // Every loop turn is 6 ticks. Budget the shells the tower actually costs, plus
+    // the lane climb and a few deaths to the tower's return fire (the siege is
+    // meant to trade lives for damage), then 50% margin.
+    const siegeSeconds = shellSeconds(Math.ceil(TOWER_HP / BULLET_DAMAGE)) + 4 * RESPAWN_DELAY + 8;
+    const siegeSteps = Math.ceil((siegeSeconds * 1.5) / (6 * DT));
     let guard = 0, sawTowerFire = false, sawDamage = false;
-    while (A.snap.towerHp[RED] > 0 && guard++ < 320) {
+    while (A.snap.towerHp[RED] > 0 && guard++ < siegeSteps) {
       const a = A.me();
       if (!a || !a.alive) { await A.drive(6, 0, 0); continue; }   // wait out respawn
       if (Math.abs(a.x - 200) > 22) { await A.drive(6, Math.sign(200 - a.x), 0); continue; }
