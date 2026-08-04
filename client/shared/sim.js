@@ -6,6 +6,7 @@
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, TANK_MAX_SPEED, TANK_ACCEL, TANK_BRAKE, HULL_TURN_RATE,
   BULLET_RADIUS, BULLET_TTL, BULLET_MAX_BOUNCES, TOWER_RADIUS, MAG_SIZE, wrapAngle,
+  POWER, SPEED_MULT,
 } from './protocol.js';
 
 // ---- Map: axis-aligned obstacle rects ----
@@ -93,11 +94,16 @@ export function stepTank(t, input, dt) {
     const shaped = (s * s * 0.6 + s * 0.4) / mag;
     mx *= shaped; my *= shaped;
   }
-  const tvx = mx * TANK_MAX_SPEED;
-  const tvy = my * TANK_MAX_SPEED;
+  // OVERDRIVE lives in the SHARED sim so the client's prediction and the server's
+  // authority boost the exact same ticks — putting it anywhere else would make
+  // every boosted tick a correction. Acceleration scales with the top speed too,
+  // or a higher ceiling would just mean a longer ramp and read as sluggish.
+  const boost = t.power === POWER.SPEED ? SPEED_MULT : 1;
+  const tvx = mx * TANK_MAX_SPEED * boost;
+  const tvy = my * TANK_MAX_SPEED * boost;
   // Asymmetric: releasing the stick brakes far harder than accelerating, which is
   // what makes stopping feel deliberate instead of like sliding on ice.
-  const maxDv = (idle ? TANK_BRAKE : TANK_ACCEL) * dt;
+  const maxDv = (idle ? TANK_BRAKE : TANK_ACCEL * boost) * dt;
   const dvx = Math.max(-maxDv, Math.min(maxDv, tvx - t.vx));
   const dvy = Math.max(-maxDv, Math.min(maxDv, tvy - t.vy));
   t.vx += dvx;

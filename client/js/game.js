@@ -449,7 +449,7 @@ export class Game {
     this.lastHp = server.hp;
     this.meServer = server;
     if (!this.me) {
-      this.me = { x: server.x, y: server.y, vx: server.vx, vy: server.vy, hull: server.hull };
+      this.me = { x: server.x, y: server.y, vx: server.vx, vy: server.vy, hull: server.hull, power: server.power };
       return;
     }
     if (!server.alive) {
@@ -467,7 +467,7 @@ export class Game {
     }
     if (!wasAlive) {
       // respawned: adopt server state wholesale, clear stale prediction
-      this.me = { x: server.x, y: server.y, vx: server.vx, vy: server.vy, hull: server.hull };
+      this.me = { x: server.x, y: server.y, vx: server.vx, vy: server.vy, hull: server.hull, power: server.power };
       this.pending.length = 0;
       this.errX = 0; this.errY = 0;
       return;
@@ -479,6 +479,9 @@ export class Game {
     this.me.x = server.x; this.me.y = server.y;
     this.me.vx = server.vx; this.me.vy = server.vy;
     this.me.hull = server.hull;
+    // the shared sim reads t.power for OVERDRIVE — replaying unacked inputs
+    // without it would predict base speed against a boosted server
+    this.me.power = server.power;
     for (const inp of this.pending) stepTank(this.me, inp, DT);
     // Absorb the correction into a decaying visual offset. The old code zeroed the
     // offset above 120px, which moved the tank the ENTIRE accumulated error in one

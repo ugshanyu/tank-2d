@@ -71,25 +71,26 @@ export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 // pocket, both the SAME kind, each claimable independently — so both teams get
 // the same opportunity at the same moment and neither owns the spawn. Driving
 // over one grants its power for POWER_DURATION seconds and refills health
-// instantly. Kinds CYCLE per wave (double -> shield -> power shot) rather than
-// roll randomly: every match sees every power, both teams can plan around what
-// comes next, and tests are deterministic. Everything here is server-
-// authoritative — the client only renders what the snapshot/events say.
-export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3 };
-export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT'];
+// instantly. Kinds CYCLE per wave rather than roll randomly: every match sees
+// every power, both teams can plan around what comes next, and tests are
+// deterministic. Everything here is server-authoritative — the client only
+// renders what the snapshot/events say.
+export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3, SPEED: 4 };
+export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT', 'OVERDRIVE'];
 // One colour per power, used by the rune, its pickup burst and the HUD timer, so
 // the thing you picked up and the thing you are holding are the same colour.
 // Each matches the power's in-world signature: amber shells, the cyan shield
-// bubble, the magenta power shell.
-export const POWER_COLORS = ['', '#ffb454', '#5ad2ff', '#ff6bd6'];
+// bubble, the magenta power shell, the green overdrive trail.
+export const POWER_COLORS = ['', '#ffb454', '#5ad2ff', '#ff6bd6', '#6ef58f'];
 export const RUNE_PERIOD = 10;          // s between waves
 // Which power each wave carries, cycled in order. POWER SHOT is a one-shot kill
-// and 4x tower damage, so it appears ONCE per five waves (~every 50 s) while the
-// other two share the rest — rare enough to be an event, not the rhythm. A cycle
-// rather than a roll: both teams can see what is coming and plan for it, and a
-// bad streak of randomness can never hand one side three power shots in a row.
+// and 4x tower damage, so it appears ONCE per seven waves (~70 s); the other
+// three share the rest evenly, twice each. A cycle rather than a roll: both
+// teams can see what is coming and plan for it, and a bad streak of randomness
+// can never hand one side three power shots in a row.
 export const RUNE_CYCLE = [
-  POWER.DOUBLE, POWER.SHIELD, POWER.POWERSHOT, POWER.DOUBLE, POWER.SHIELD,
+  POWER.DOUBLE, POWER.SHIELD, POWER.SPEED, POWER.POWERSHOT,
+  POWER.DOUBLE, POWER.SHIELD, POWER.SPEED,
 ];
 export const POWER_DURATION = 7;        // s a claimed power lasts
 export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)
@@ -97,6 +98,10 @@ export const POWER_SHOTS = 3;           // powershot grants this many shells...
 export const POWERSHOT_TOWER_DAMAGE = 140; // ...each one-shots a tank, and hits
                                         // the tower for 4x a normal shell
 export const DOUBLE_SPREAD = 0.07;      // rad between the two barrels of a double
+// OVERDRIVE. Applied inside the SHARED sim, so prediction and the server agree
+// on every boosted tick. Acceleration scales with it, otherwise a faster top
+// speed just means a longer ramp and the boost reads as sluggish, not quick.
+export const SPEED_MULT = 1.55;         // 205 -> ~318 px/s
 // THE TWO GATES. On the halfway line (y = ARENA_H/2) the obstacles are the left
 // nub (x 40-140), the centre box (x 300-420) and the right nub (x 580-680) — so
 // the gaps flanking the centre box are at x≈220 and x≈500. Both runes sit dead
@@ -222,10 +227,10 @@ export function decodePong(v) {
 // missed by anyone who connected after it fired).
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
-// flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7), bits5-6 = active power
-// (POWER.*). All of it rides in the spare bits of one byte, so teams, ammo and
-// powers cost 0 extra bytes per tank on the 60 Hz hot path — and every one of
-// them stays authoritative rather than client-guessed.
+// flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7), bits5-7 = active
+// power (POWER.*, up to 7 kinds). All of it rides in the spare bits of one byte,
+// so teams, ammo and powers cost 0 extra bytes per tank on the 60 Hz hot path —
+// and every one of them stays authoritative rather than client-guessed.
 const TANK_BYTES = 14;
 const SNAP_HEADER = 14;
 export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 0) {
@@ -250,7 +255,7 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 
     v.setUint8(o + 10, encAngle8(t.turret));
     v.setUint8(o + 11, Math.max(0, Math.min(255, t.hp)));
     v.setUint8(o + 12, (t.alive ? 1 : 0) | ((t.team & 1) << 1)
-      | ((Math.min(7, t.ammo ?? MAG_SIZE) & 7) << 2) | ((t.power ?? 0) << 5));
+      | ((Math.min(7, t.ammo ?? MAG_SIZE) & 7) << 2) | (((t.power ?? 0) & 7) << 5));
     v.setUint8(o + 13, Math.min(255, t.score));
     o += TANK_BYTES;
   }
@@ -281,7 +286,7 @@ export function decodeSnapshot(v /* DataView */) {
       alive: (v.getUint8(o + 12) & 1) !== 0,
       team: (v.getUint8(o + 12) >> 1) & 1,
       ammo: (v.getUint8(o + 12) >> 2) & 7,
-      power: (v.getUint8(o + 12) >> 5) & 3,
+      power: (v.getUint8(o + 12) >> 5) & 7,
       score: v.getUint8(o + 13),
     });
     o += TANK_BYTES;

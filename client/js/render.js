@@ -403,6 +403,7 @@ export class Renderer {
       if (!t.alive) continue;
       this._tank(t.x, t.y, t.hull, t.turret, t.team, t.name, t.dispHp ?? t.hp, false);
       if (t.power === 2) this._shield(t.x, t.y, now);
+      else if (t.power === 4) this._boostTrail(t.x, t.y, t.vx, t.vy);
     }
     // Aim ray. Direct-touch aiming means a ~45px fingertip sits on top of a 31px
     // enemy sprite — you cannot see the thing you are shooting at. The ray shows
@@ -436,6 +437,9 @@ export class Renderer {
         state.ammo ?? MAG_SIZE, !!state.reloading,
       );
       if (state.myPower === 2) this._shield(state.mePos.x, state.mePos.y, now);
+      else if (state.myPower === 4 && state.me) {
+        this._boostTrail(state.mePos.x, state.mePos.y, state.me.vx, state.me.vy);
+      }
       // power countdown: a golden bar draining under the tank — deliberately NOT
       // a ring; circles around the own tank read as a permanent aura.
       if (state.myPower > 0 && state.myPowerFrac > 0) {
@@ -776,10 +780,22 @@ export class Renderer {
   //   DOUBLE     two stacked shells with trails
   //   SHIELD     a shield outline
   //   POWERSHOT  a lightning bolt
+  //   SPEED      a fast-forward double chevron
   _powerIcon(kind, col) {
     const { ctx } = this;
     ctx.fillStyle = col;
     ctx.strokeStyle = col;
+    if (kind === 4) {
+      for (const dx of [-9, 0]) {
+        ctx.beginPath();
+        ctx.moveTo(dx, -8);
+        ctx.lineTo(dx + 9, 0);
+        ctx.lineTo(dx, 8);
+        ctx.closePath();
+        ctx.fill();
+      }
+      return;
+    }
     if (kind === 1) {
       ctx.lineWidth = 2.4;
       ctx.lineCap = 'round';
@@ -808,6 +824,33 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
     }
+  }
+
+  // Overdrive trail — chevrons streaming off the BACK of a boosted tank, so an
+  // opponent can see it coming without a label. Drawn from velocity, so it
+  // vanishes when the tank is standing still (which is the honest read: a
+  // stationary tank is not outrunning anything).
+  _boostTrail(x, y, vx, vy) {
+    const { ctx } = this;
+    const sp = Math.hypot(vx || 0, vy || 0);
+    if (sp < 40) return;
+    const a = Math.atan2(vy, vx);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(a);
+    ctx.strokeStyle = '#6ef58f';
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) {
+      ctx.globalAlpha = (1 - i * 0.28) * Math.min(1, sp / 260) * 0.85;
+      const d = -(TANK_RADIUS + 5 + i * 9);
+      ctx.beginPath();
+      ctx.moveTo(d + 6, -7);
+      ctx.lineTo(d, 0);
+      ctx.lineTo(d + 6, 7);
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // The shield bubble — drawn on ANY tank whose snapshot power bit says so.

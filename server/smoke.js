@@ -497,7 +497,7 @@ async function checkAdaptiveInterp() {
 // P picks every rune; W (P's teammate) supplies friendly-fire damage for the
 // heal check; V (the enemy) shoots the shield and eats the power shot.
 async function checkPowers() {
-  const { POWER, RUNE_SPOTS, RUNE_PERIOD, POWERSHOT_TOWER_DAMAGE } = await import('../client/shared/protocol.js');
+  const { POWER, RUNE_SPOTS, POWERSHOT_TOWER_DAMAGE, SPEED_MULT, TANK_MAX_SPEED } = await import('../client/shared/protocol.js');
   const P = new Bot('picker');
   const V = new Bot('victim');
   const W = new Bot('wingman');
@@ -571,11 +571,38 @@ async function checkPowers() {
   check(blockedBx.length >= 1, `the shield blocks shots (${blockedBx.length} blocked bx)`);
   check(P.me().hp === hpShielded && P.me().alive, 'and the shielded tank takes zero damage');
 
-  // ---- wave 3: POWER SHOT ----
+  // ---- wave 3: OVERDRIVE ----
+  // measure a clean straight-line run at base speed FIRST, as the control
+  await goTo(P, RUNE_SPOTS[0].x, 760);
+  const runFor = async (ticks) => {
+    const a = P.me();
+    await P.drive(ticks, 0, -1);
+    const b = P.me();
+    return Math.abs(b.y - a.y);
+  };
+  await P.drive(20, 0, 0);                          // settle to a standstill
+  const baseRun = await runFor(30);
+  await P.drive(20, 0, 0);
+
+  guard = 0;
+  while (P.me().power !== POWER.SPEED && guard++ < 200) await P.drive(12, 0, 0);
+  check(P.me().power === POWER.SPEED, `a wave grants OVERDRIVE (power ${P.me().power})`);
+  // P is standing ON the gate now; run the same 30 ticks boosted
+  await P.drive(20, 0, 0);
+  const boostRun = await runFor(30);
+  const ratio = boostRun / baseRun;
+  check(ratio > 1.25 && ratio < SPEED_MULT + 0.2,
+    `OVERDRIVE really moves the tank faster (${baseRun.toFixed(0)}px -> ${boostRun.toFixed(0)}px, `
+    + `${ratio.toFixed(2)}x vs ${SPEED_MULT}x nominal)`);
+  await sleep(7200);
+  check(P.me().power === POWER.NONE, 'and it lapses like every other power');
+
+  // ---- wave 4: POWER SHOT ----
   // V is still parked straight up the gate's lane from the shield phase, so P
   // has an immediate clear shot without driving anywhere.
+  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
   guard = 0;
-  while (P.me().power !== POWER.POWERSHOT && guard++ < 80) await P.drive(12, 0, 0);
+  while (P.me().power !== POWER.POWERSHOT && guard++ < 200) await P.drive(12, 0, 0);
   check(P.me().power === POWER.POWERSHOT, `rune 3 grants POWER SHOT (power ${P.me().power})`);
 
   // charge 1: one shot, one kill, against a FULL-health tank
