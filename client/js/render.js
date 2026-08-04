@@ -5,7 +5,7 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP,
-  TOWER_RADIUS, TOWER_HP, TOWER_RANGE, MAG_SIZE, BULLET_DAMAGE,
+  TOWER_RADIUS, TOWER_HP, MAG_SIZE, BULLET_DAMAGE,
 } from '../shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../shared/sim.js';
 
@@ -40,7 +40,6 @@ const PALETTE = TEAM_COLORS.map((c) => ({
   towerFill: shade(c, -0.62),
   towerCore: shade(c, -0.3),
   towerRim: shade(c, 0.15),
-  range: rgba(c, 0.15),
 }));
 
 export class Renderer {
@@ -55,7 +54,6 @@ export class Renderer {
     this.shakeMag = 0;
     this.shakeAng = 0;
     this.bg = null;          // prerendered static arena
-    this.rings = new Map();  // team -> prerendered dashed range ring
     this._initParticles();
     // Hull gradients live in the tank's LOCAL space, so they are identical for
     // every tank of a team — building one per tank per frame was 240 gradient
@@ -153,15 +151,10 @@ export class Renderer {
     g.beginPath(); g.moveTo(0, ARENA_H / 2); g.lineTo(ARENA_W, ARENA_H / 2); g.stroke();
     g.setLineDash([]);
 
-    // Territory decals under each tower, so you can read whose half you are in.
-    for (const tw of TOWERS) {
-      const pal = PALETTE[tw.team & 1];
-      g.fillStyle = rgba(pal.base, 0.055);
-      g.beginPath(); g.arc(tw.x, tw.y, 190, 0, Math.PI * 2); g.fill();
-      g.strokeStyle = rgba(pal.base, 0.20);
-      g.lineWidth = 2 / zoom;
-      g.beginPath(); g.arc(tw.x, tw.y, 190, 0, Math.PI * 2); g.stroke();
-    }
+    // No circles around the towers at all — not the range ring, not the 190px
+    // territory decal. Both read as "the tower's radius" and neither is
+    // information the player acts on; the halfway line already says whose half
+    // this is, and the tower itself is unmistakable.
 
     for (const r of OBSTACLES) {
       // fake top-left key light, consistent across every object in the scene
@@ -213,26 +206,9 @@ export class Renderer {
       g.stroke();
     }
     this.bg = c;
-
-    // Dashed range rings are the single most expensive call in the renderer on
-    // iOS — CoreGraphics flattens a 330px-radius dashed circle into ~130 stroked
-    // subpaths every frame. Bake each team's ring once.
-    this.rings.clear();
-    const rp = Math.ceil((TOWER_RANGE + 4) * zoom * this.dpr);
-    for (let team = 0; team < PALETTE.length; team++) {
-      const rc = (typeof OffscreenCanvas !== 'undefined')
-        ? new OffscreenCanvas(rp * 2, rp * 2)
-        : Object.assign(document.createElement('canvas'), { width: rp * 2, height: rp * 2 });
-      const rg = rc.getContext('2d');
-      rg.setTransform(1, 0, 0, 1, rp, rp);
-      rg.strokeStyle = PALETTE[team].range;
-      rg.lineWidth = 1.5 * this.dpr;
-      rg.setLineDash([7 * zoom * this.dpr, 9 * zoom * this.dpr]);
-      rg.beginPath();
-      rg.arc(0, 0, TOWER_RANGE * zoom * this.dpr, 0, Math.PI * 2);
-      rg.stroke();
-      this.rings.set(team, { canvas: rc, r: rp });
-    }
+    // (The prerendered dashed range rings that used to be baked here are gone
+    // with the rings themselves — they were the single most expensive call in
+    // the renderer on iOS, so this is a straight win as well as a visual one.)
   }
 
   // ------------------------------------------------------------- particles --
@@ -370,21 +346,10 @@ export class Renderer {
     ctx.scale(cam.zoom, cam.zoom);
     ctx.translate(-cam.x, -cam.y);
 
-    // Enemy tower threat rings, blitted from the prerendered layer (drawn in
-    // screen space under the world pass so the dash pattern never re-flattens).
+    // No range rings. The dashed threat radius drew two huge circles across the
+    // middle of a 720px arena — more ink than the arena itself, and the tower
+    // already announces its reach by shooting at you.
     const towerHp = state.towerHp || [TOWER_HP, TOWER_HP];
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    for (let i = 0; i < TOWERS.length; i++) {
-      const tw = TOWERS[i];
-      if (tw.team === state.myTeam || (towerHp[i] ?? 0) <= 0) continue;
-      const ring = this.rings.get(tw.team & 1);
-      if (!ring) continue;
-      const px = ((tw.x - cam.x) * cam.zoom + this.vw / 2 + sx) * this.dpr;
-      const py = ((tw.y - cam.y) * cam.zoom + this.vh / 2 + sy) * this.dpr;
-      ctx.drawImage(ring.canvas, px - ring.r, py - ring.r);
-    }
-    ctx.restore();
 
     // towers (the objective) sit under everything that moves
     // Towers track whatever they last shot at, and kick when they fire.

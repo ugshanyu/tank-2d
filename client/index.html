@@ -26,10 +26,6 @@
   #hud { position: fixed; inset: 0; pointer-events: none;
     padding: calc(var(--sat) + 10px) calc(var(--sar) + 12px)
              calc(var(--sab) + 10px) calc(var(--sal) + 12px); }
-  #scores { position: absolute; font-size: 12px; line-height: 1.35;
-    background: rgba(6,10,18,0.5); border-radius: 9px; padding: 5px 9px;
-    top: calc(var(--sat) + 8px); left: calc(var(--sal) + 10px); }
-  #scores .me { color: #8be9fd; font-weight: 700; }
   /* Ping/status readout removed: it was chrome the player could not act on, and
      it cost a permanent panel over the top-right of the arena. Connection trouble
      is surfaced by the #offline overlay instead, which is unmissable. */
@@ -67,14 +63,6 @@
     box-shadow: inset 0 0 54px 6px rgba(255,40,40,.5);
     transition: opacity .3s ease-out; }
   #hurt.on { opacity: .85; transition-duration: .05s; }
-
-  /* team scoreboard rows */
-  #scores .row { display: flex; justify-content: space-between; gap: 10px; }
-  #scores .hdr { font-weight: 800; letter-spacing: .5px; font-size: 12px; white-space: nowrap; }
-  #scores .me { font-weight: 700; }
-  #scores i { font-style: normal; font-size: 11px; letter-spacing: .5px; color: #8b9dc0;
-    border: 1px solid #33405c; border-radius: 4px; padding: 0 3px; margin-left: 5px;
-    vertical-align: middle; }
 
   /* match result */
   #match { position: fixed; inset: 0; z-index: 5; display: flex; pointer-events: none;
@@ -196,7 +184,6 @@
 <canvas id="game"></canvas>
 
 <div id="hud">
-  <div id="scores"></div>
   <div id="status"></div>
   <div id="respawn"><span>DESTROYED</span><small id="respawnIn"></small></div>
   <div id="feed"></div>

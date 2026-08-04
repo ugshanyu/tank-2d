@@ -434,7 +434,7 @@ async function checkNoRevives(port) {
         deadSince.delete(st.id);
         if (Math.abs(Date.now() - matchEdgeAt) < 3000) continue;  // match reset, not a lie
         fastest = Math.min(fastest, deadFor);
-        // a REAL respawn takes RESPAWN_DELAY (2.5s); anything much faster is the
+        // a REAL respawn takes RESPAWN_DELAY; anything much faster is the
         // client walking back a kill it invented. 60% leaves room for clock skew.
         if (deadFor < RESPAWN_DELAY * 1000 * 0.6) revives++;
       }
@@ -971,8 +971,9 @@ async function main() {
     const hpSeen = B.me().hp;
     check(hpSeen === 0, `dead tank hp is 0 (got ${hpSeen})`);
 
-    // ---- respawn ----
-    await sleep(3000);
+    // ---- respawn ---- (derived: a hard-coded wait silently becomes a failure
+    // the moment RESPAWN_DELAY changes, which is exactly what happened at 8s)
+    await sleep(RESPAWN_DELAY * 1000 + 700);
     check(B.me().alive && B.me().hp === MAX_HP, 'B respawned alive at full hp');
     check(B.ev('spawn').some((e) => e.id === B.id), 'spawn event broadcast');
 

@@ -60,7 +60,9 @@ export const RELOAD_TIME = 1.25;        // s to refill an empty magazine
 if (MAG_SIZE > 7) throw new Error('MAG_SIZE must fit in 3 snapshot bits (<= 7)');
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
-export const RESPAWN_DELAY = 2.5;       // seconds
+export const RESPAWN_DELAY = 8;         // s. Long enough that dying COSTS you —
+                                        // 2.5s was short enough to trade lives
+                                        // for tower damage and just keep coming.
 export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 
 // ---- Power runes ----

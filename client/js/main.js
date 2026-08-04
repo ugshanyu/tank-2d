@@ -21,7 +21,7 @@ const $ = (id) => document.getElementById(id);
 
 // Cached once — these were being looked up ~10x per frame.
 const EL = {};
-for (const id of ['scores', 'status', 'respawn', 'respawnIn', 'toast', 'calibrate',
+for (const id of ['status', 'respawn', 'respawnIn', 'toast', 'calibrate',
                   'match', 'matchWho', 'matchSub', 'matchTally', 'hurt', 'gear',
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
@@ -508,18 +508,10 @@ function showScorecard() {
 }
 
 function updateHud() {
-  // team scoreboard: tower integrity is the win condition, kills are secondary
-  const rows = game.scoreboard();
-  const tHp = game.towerHp;
-  const teamKills = game.teamScores();
-  let html = '';
-  for (let team = 0; team < TEAM_NAMES.length; team++) {
-    const pct = Math.round(Math.max(0, Math.min(1, (tHp[team] ?? 0) / TOWER_HP)) * 100);
-    html += `<div class="hdr" style="color:${teamColor(team)}">`
-      + `${TEAM_NAMES[team]}${team === game.myTeam ? ' (you)' : ''} ${pct}% · ${teamKills[team]}k</div>`;
-  }
-  const el = EL.scores;
-  if (el.__last !== html) { el.innerHTML = html; el.__last = html; }
+  // No team header. Tower integrity is the win condition and each tower already
+  // wears its own health bar on the field, where the fight actually is — a
+  // duplicate percentage in the corner was one more thing to read and the
+  // slowest way to learn it.
 
   // kill feed (4 s per row)
   const now = performance.now();
@@ -580,7 +572,6 @@ let soloRAF = 0;
 function startSoloPractice() {
   if (soloActive || netStarted) return;
   soloActive = true;
-  $('scores').innerHTML = '';
   $('status').innerHTML = '<span>practice</span>';
 
   const spawn = TEAM_SPAWNS[0][0];
