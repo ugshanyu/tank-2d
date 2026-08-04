@@ -131,6 +131,10 @@ export class Sfx {
         this._noise({ dur: 0.09, gain: 0.42, pan: p, freq: 1600 });
         this._tone({ type: 'triangle', f0: 420, f1: 190, dur: 0.09, gain: 0.20, pan: p });
         break;
+      case 'confirm':                               // server-confirmed damage: the "dink"
+        this._tone({ type: 'triangle', f0: 1250, f1: 1050, dur: 0.06, gain: 0.30, pan: p, attack: 0.001 });
+        this._noise({ dur: 0.03, gain: 0.14, pan: p, type: 'bandpass', freq: 3200, q: 14 });
+        break;
       case 'hurt':                                  // I took damage
         this._noise({ dur: 0.16, gain: 0.5, freq: 900 });
         this._tone({ type: 'triangle', f0: 260, f1: 130, dur: 0.2, gain: 0.34 });
@@ -177,7 +181,7 @@ export class Sfx {
 // Haptics. iOS Safari ignores navigator.vibrate entirely — the audio above is the
 // substitute there — but it lands on Android and in several WebViews.
 const HAPTIC = {
-  fire: 12, hit: 18, hurt: 35, kill: [0, 18, 40, 18],
+  fire: 12, hit: 18, confirm: 14, hurt: 35, kill: [0, 18, 40, 18],
   death: 90, towerhit: 20, win: [0, 60, 50, 120], lose: 140,
 };
 let lastBuzz = -1e9;

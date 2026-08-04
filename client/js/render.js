@@ -411,10 +411,10 @@ export class Renderer {
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
-    // remote tanks
+    // remote tanks — bar shows the eased display hp (authoritative underneath)
     for (const t of state.others) {
       if (!t.alive) continue;
-      this._tank(t.x, t.y, t.hull, t.turret, t.team, t.name, t.hp, false);
+      this._tank(t.x, t.y, t.hull, t.turret, t.team, t.name, t.dispHp ?? t.hp, false);
     }
     // Aim ray. Direct-touch aiming means a ~45px fingertip sits on top of a 31px
     // enemy sprite — you cannot see the thing you are shooting at. The ray shows
@@ -455,12 +455,15 @@ export class Renderer {
     const shellR = Math.max(BULLET_RADIUS, 6 / cam.zoom);
     for (const b of state.bullets) {
       const mine = b.mine;
-      const tx = b.x - b.vx * 0.045, ty = b.y - b.vy * 0.045;
+      // drawOff: cosmetic delta between physics (matches the server) and the
+      // drawn barrel during a correction; eases to zero over the first frames
+      const bx = b.x + (b.drawOffX || 0), by = b.y + (b.drawOffY || 0);
+      const tx = bx - b.vx * 0.045, ty = by - b.vy * 0.045;
       ctx.strokeStyle = mine ? 'rgba(255,230,150,0.45)' : 'rgba(255,150,110,0.45)';
       ctx.lineWidth = 3.5;
-      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by); ctx.stroke();
       ctx.fillStyle = mine ? '#ffe796' : '#ff9d6e';
-      ctx.beginPath(); ctx.arc(b.x, b.y, shellR, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(bx, by, shellR, 0, Math.PI * 2); ctx.fill();
     }
 
     // Particles render OVER the tanks: a 14-screen-px spark under a 28px sprite
@@ -730,6 +733,26 @@ export class Renderer {
       ctx.strokeStyle = '#8be9fd';
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 40 * f, 0, Math.PI * 2); ctx.stroke();
+    } else if (e.kind === 'confirm') {
+      // Server-confirmed hitmarker: four ticks + a floating damage number. The
+      // ONE symbol in the game that only ever appears when damage really landed.
+      const g = 1 - ease(f);
+      const r0 = 10 + 6 * ease(f);
+      ctx.translate(e.x, e.y);
+      ctx.strokeStyle = `rgba(255,255,255,${0.95 * g})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      for (let i = 0; i < 4; i++) {
+        const a = Math.PI / 4 + i * Math.PI / 2;
+        ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+        ctx.lineTo(Math.cos(a) * (r0 + 8), Math.sin(a) * (r0 + 8));
+      }
+      ctx.stroke();
+      ctx.globalAlpha = Math.min(1, 2 * (1 - f));
+      ctx.font = 'bold 17px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffe796';
+      ctx.fillText(`-${e.dmg ?? ''}`, 0, -22 - 16 * ease(f));
     }
     ctx.restore();
   }

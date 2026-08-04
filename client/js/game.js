@@ -8,12 +8,17 @@
 //    snapshots — smooth regardless of network jitter.
 //  * SHELLS: exactly ONE object per shot, on ONE clock (real frame time). Mine is
 //    created the moment I pull the trigger; the server's `fire` echo only re-keys
-//    that same object to the authoritative id. Nothing is ever spawned twice, and
-//    every shell resolves locally the instant it connects on screen — the server
-//    echo is a confirmation, not the trigger.
+//    that same object to the authoritative id. Nothing is ever spawned twice.
+//  * AUTHORITY: the client renders CONTACT instantly with full weight — impact
+//    sound, sparks, shake, shell retirement — because a graze produces those too,
+//    so they never need undoing. Only the server declares CONSEQUENCE: health,
+//    explosions, deaths, kill credit, score. The one exception is static geometry
+//    (walls, towers): those verdicts depend on nothing that moves, so the client
+//    owns them outright. This split is what makes a kill IMPOSSIBLE to un-happen:
+//    nothing on screen ever asserts a fact the server might contradict.
 
 import {
-  DT, INTERP_DELAY_MS, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
+  DT, FIRE_COOLDOWN, MUZZLE_OFFSET, BULLET_SPEED, MAX_HP, TOWER_HP,
   RESPAWN_DELAY, BULLET_DAMAGE, MAG_SIZE, RELOAD_TIME, TOWER_OWNER_BASE,
   TANK_RADIUS, BULLET_RADIUS, TOWER_RADIUS,
   wrapAngle, encAngle16, decAngle16,
@@ -24,7 +29,8 @@ const BUFFER_MS = 1200;          // how much snapshot history to keep per tank
 const MAX_EXTRAP_MS = 160;       // extrapolation velocity eases to zero across this
 const UNCONFIRMED_MS = 1000;     // drop a shell the server never acknowledged
 const LINGER_MS = 1200;          // keep a spent shell this long, to swallow its echo
-const PREDICT_TTL_MS = 700;      // an unconfirmed predicted hit expires after this
+const SELF_FEEDBACK_MS = 700;    // one hurt beat per hit: contact stamp mutes echoes
+const HP_SMOOTH_S = 0.12;        // s — displayed health eases to authoritative hp
 const ERR_HALFLIFE = 0.09;       // s — visual correction time constant (framerate independent)
 const MAX_ERR = 40;              // px — corrections are clamped here, never zeroed
 const ERR_MAX_RATE = 320;        // px/s — hard ceiling on visible correction speed
@@ -88,12 +94,11 @@ export class Game {
     this._remotePool = new Map();  // id -> reusable render state + its err offset
     this._shellOut = [];           // pooled shell list handed to the renderer
 
-    // Damage we have already applied locally but the server has not confirmed
-    // yet — one entry per shell that visibly connected. See displayHp().
-    this._pending = [];            // [{victim, at, key}]
-    this._selfHitAt = -1e9;        // last time a shell was resolved onto US locally
+    // Feedback dedup, NOT outcome prediction: the moment a shell visibly touches
+    // US we play the hurt beat once, and this stamp mutes the server echoes for
+    // the same hit (`bx` and the snapshot hp drop arrive ~1 RTT later).
+    this._selfFeedbackAt = -1e9;
     this._meHist = [];             // our own recent rendered positions, see meAt()
-    this._predDead = new Map();    // id -> when we already played their death
     this.pendingAward = null;      // match result awaiting XP award
 
     // impulses the renderer/audio layer drains each frame
@@ -186,15 +191,23 @@ export class Game {
       vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
       age: 0, bounces: 0, owner, mine: owner === this.myId,
       bornAt: performance.now(), confirmed,
+      // Cosmetic-only offset between where the shell IS (physics, must match the
+      // server) and where it is DRAWN (the barrel, which includes the correction
+      // offset). Decays over flight; see _spawnPredicted.
+      drawOffX: 0, drawOffY: 0,
       dead: false, deadAt: 0, hitId: 0, hitTower: -1,
     };
     this.shells.set(key, s);
     return s;
   }
 
-  // A shell is spent: mark it, play the impact, and leave it in the map so the
-  // server's echo lands on something and stays silent.
-  _endShell(s, victimId, serverHp) {
+  // A shell is spent. CONTACT feedback only: sparks, sound, shake — the things a
+  // graze also produces, so nothing here ever needs to be undone. Health bars,
+  // deaths, kill credit all wait for the server (`bx`/`death`/snapshot). The one
+  // exception is static geometry — walls and towers don't move, so the client's
+  // verdict on them is the server's verdict, and it plays with full confidence.
+  // The dead shell stays in the map so the echo lands on it and stays silent.
+  _endShell(s, victimId) {
     if (s.dead) return;
     s.dead = true;
     s.deadAt = performance.now();
@@ -203,22 +216,17 @@ export class Game {
 
     if (victimId) {
       this.effects.push({ kind: 'hit', x: s.x, y: s.y, born: s.deadAt, dur: 450 });
-      this._addPending(victimId, s.key);
       const mine = victimId === this.myId;
-      if (mine) this._selfHitAt = s.deadAt;
-      // FINAL HIT = IMMEDIATE DEATH — but only when the AUTHORITATIVE hp says this
-      // shell is genuinely lethal. Predicting a kill off a stack of unconfirmed
-      // hits meant that on a 200ms link, where our local verdict and the server's
-      // rewound one disagree often, a tank could explode and then get back up.
-      // A kill that un-happens is far worse than a kill that lands a beat late, so
-      // the health BAR still moves on every local hit (cheap, self-correcting)
-      // while the DEATH waits for hp the server has actually confirmed.
-      if (serverHp - BULLET_DAMAGE <= 0) { this._predictDeath(victimId, s.x, s.y); return; }
+      if (mine) this._selfFeedbackAt = s.deadAt;
       this.shake = Math.max(this.shake, mine ? 7 : 3);
       this.events.push({ kind: mine ? 'hurt' : 'hit', key: victimId, x: s.x });
       return;
     }
     if (s.hitTower >= 0) {
+      // Static geometry — but only when unambiguous: if a tank is close enough to
+      // the impact that the server might score a TANK hit instead, retire quietly
+      // and let the echo speak, so tower feedback never has to be walked back.
+      if (this._tankNearImpact(s)) { s.hitTower = -2; return; }
       if (s.mine && s.hitTower !== this.myTeam) { this.matchTowerDamage += BULLET_DAMAGE; s.counted = true; }
       this.effects.push({ kind: 'hit', x: s.x, y: s.y, born: s.deadAt, dur: 450 });
       this.shake = Math.max(this.shake, 5);
@@ -227,6 +235,19 @@ export class Game {
     }
     this.effects.push({ kind: 'poof', x: s.x, y: s.y, born: s.deadAt, dur: 250 });
     this.events.push({ kind: 'bounce', key: s.key, x: s.x });
+  }
+
+  // Is any living tank near this spent shell's final segment? Used to demote a
+  // tower/wall verdict to "wait for the server" when the server might disagree.
+  _tankNearImpact(s) {
+    const r = 2 * HIT_RADIUS;
+    for (const buf of this.remotes.values()) {
+      const last = buf.length ? buf[buf.length - 1] : null;
+      if (last && last.alive && segPointDist(s.prevX, s.prevY, s.x, s.y, last.x, last.y) < r) return true;
+    }
+    if (this.me && this.meServer && this.meServer.alive
+        && segPointDist(s.prevX, s.prevY, s.x, s.y, this.me.x, this.me.y) < r) return true;
+    return false;
   }
 
   // Resolve every live shell against exactly the tanks being DRAWN this frame, so
@@ -238,28 +259,29 @@ export class Game {
   resolveHits(others, renderMs) {
     for (const s of this.shells.values()) {
       if (s.dead) continue;
-      let hit = null;
+      let hitId = 0;
       for (const t of others) {
         if (!t.alive || t.id === s.owner) continue;
-        if (segPointDist(s.prevX, s.prevY, s.x, s.y, t.x, t.y) < HIT_RADIUS) { hit = t; break; }
+        // RAW interpolated position, not the smoothed one: the server rewinds to
+        // raw history, and testing against x+errX disagreed with it by up to
+        // MAX_ERR px during exactly the corrections that matter.
+        if (segPointDist(s.prevX, s.prevY, s.x, s.y, t.rawX ?? t.x, t.rawY ?? t.y) < HIT_RADIUS) { hitId = t.id; break; }
       }
-      if (!hit && !s.mine && this.meServer && this.meServer.alive) {
+      if (!hitId && !s.mine && this.meServer && this.meServer.alive) {
         const past = this.meAt(renderMs);
         if (past && segPointDist(s.prevX, s.prevY, s.x, s.y, past.x, past.y) < HIT_RADIUS) {
-          hit = { id: this.myId, hp: this.meServer.hp };
+          hitId = this.myId;
         }
       }
-      if (hit) this._endShell(s, hit.id, hit.hp);
+      if (hitId) this._endShell(s, hitId);
     }
   }
 
-  // Wipe every shell and everything predicted from one: a respawn, a match reset
-  // or a reconnect invalidates all of it at once.
+  // Wipe every shell: a respawn, a match reset or a reconnect invalidates all of
+  // them at once.
   _clearShells() {
     this.shells.clear();
-    this._pending.length = 0;
-    this._predDead.clear();
-    this._selfHitAt = -1e9;
+    this._selfFeedbackAt = -1e9;
   }
 
   // Pooled shell list for the renderer — this runs every frame.
@@ -268,79 +290,6 @@ export class Game {
     out.length = 0;
     for (const s of this.shells.values()) if (!s.dead) out.push(s);
     return out;
-  }
-
-  // A kill, played the instant the shell lands rather than a round trip later.
-  // The server is still the authority — this only brings the FEEDBACK forward,
-  // and the matching `death` event is suppressed so nothing plays twice.
-  _predictDeath(victimId, x, y) {
-    if (this._predDead.has(victimId)) return;
-    this._predDead.set(victimId, performance.now());
-
-    const team = victimId === this.myId ? this.myTeam : (this.teams.get(victimId) ?? 0);
-    this.effects.push({ kind: 'explosion', x, y, born: performance.now(), dur: 600, team });
-
-    if (victimId === this.myId) {
-      this.shake = Math.max(this.shake, 14);
-      this.hitstopMs = Math.max(this.hitstopMs, 70);
-      this.events.push({ kind: 'death' });
-    } else {
-      this.shake = Math.max(this.shake, 10);
-      this.hitstopMs = Math.max(this.hitstopMs, 55);
-      this.killBannerAt = performance.now();
-      this.killBannerName = this.names.get(victimId) || '';
-      this.events.push({ kind: 'kill' });
-    }
-  }
-
-  // Did we already play this death locally? Bounded so a stale entry can never
-  // suppress a real death later in the match.
-  _deathPredicted(id) {
-    const at = this._predDead.get(id);
-    if (at === undefined) return false;
-    if (performance.now() - at > 1500) { this._predDead.delete(id); return false; }
-    return true;
-  }
-
-  // A kill we called that the server did not confirm. Snapshots lag the impact by
-  // roughly the interpolation delay plus a round trip, so anything still standing
-  // after that window was never dead — put it back rather than leaving a hole in
-  // the arena for a second and a half.
-  _releaseDeath(id) {
-    const at = this._predDead.get(id);
-    if (at !== undefined && performance.now() - at > 400) this._predDead.delete(id);
-  }
-
-  // ---------- predicted damage ----------
-  // One entry per shell that visibly connected, released the moment the server's
-  // echo for that exact shell arrives. Because the ledger is keyed by shell rather
-  // than accumulated into a number, there is no cap to tune and no drift: a
-  // four-shell burst reads as a kill on the frame the fourth one lands, and a
-  // graze the server disagrees with releases cleanly instead of sticking.
-  _addPending(victim, key) {
-    this._pending.push({ victim, key, at: performance.now() });
-  }
-
-  _releasePending(key) {
-    for (let i = 0; i < this._pending.length; i++) {
-      if (this._pending[i].key === key) { this._pending.splice(i, 1); return true; }
-    }
-    return false;
-  }
-
-  _pendingDamage(id) {
-    const cutoff = performance.now() - PREDICT_TTL_MS;
-    let dmg = 0;
-    for (const p of this._pending) if (p.victim === id && p.at > cutoff) dmg += BULLET_DAMAGE;
-    return dmg;
-  }
-
-  hasPending(id) { return this._pendingDamage(id) > 0; }
-
-  // Authoritative HP, minus whatever we have already shown the player.
-  displayHp(id, serverHp) {
-    const dmg = this._pendingDamage(id);
-    return dmg ? Math.max(0, serverHp - dmg) : serverHp;
   }
 
   // Where OUR tank was on the interpolated timeline. Incoming shells are rendered
@@ -380,7 +329,7 @@ export class Game {
   // gets folded into errX and smoothed — exactly what clearing the buffer prevents.
   _breakSmoothing(id) {
     const st = this._remotePool.get(id);
-    if (st) { st.hasPrev = false; st.errX = 0; st.errY = 0; }
+    if (st) { st.hasPrev = false; st.errX = 0; st.errY = 0; st.dispHp = undefined; }
   }
 
   // 0..1 for the reload arc drawn around your own tank
@@ -404,15 +353,23 @@ export class Game {
       this._reloadUntil = now + RELOAD_TIME * 1000;
       this.events.push({ kind: 'reload' });
     }
-    // Spawn from where the barrel is DRAWN (err offset included), otherwise the
-    // shell and muzzle flash detach from the tank during any correction.
-    const x = this.me.x + this.errX + Math.cos(a) * MUZZLE_OFFSET;
-    const y = this.me.y + this.errY + Math.sin(a) * MUZZLE_OFFSET;
+    // PHYSICS spawns from the true predicted position — the same origin the
+    // server uses — otherwise any active correction (errX) laterally offset the
+    // whole trajectory by up to MAX_ERR px and the server scored different hits
+    // than the player watched. The muzzle flash and the first frames of the
+    // tracer still DRAW from the barrel: the offset rides on the shell as a
+    // cosmetic delta and eases out in flight.
+    const x = this.me.x + Math.cos(a) * MUZZLE_OFFSET;
+    const y = this.me.y + Math.sin(a) * MUZZLE_OFFSET;
     this.shake = Math.max(this.shake, 2.5);
     this.lastFireAt = performance.now();
-    this.events.push({ kind: 'fire', key: this.myId, x });
-    this._spawnShell(`n${nonce}`, x, y, a, this.myId, false);
-    this.effects.push({ kind: 'muzzle', x, y, a, born: performance.now(), dur: 90 });
+    this.events.push({ kind: 'fire', key: this.myId, x: x + this.errX });
+    const s = this._spawnShell(`n${nonce}`, x, y, a, this.myId, false);
+    s.drawOffX = this.errX; s.drawOffY = this.errY;
+    this.effects.push({
+      kind: 'muzzle', x: x + this.errX, y: y + this.errY, a,
+      born: performance.now(), dur: 90,
+    });
   }
 
   // ---------- snapshots ----------
@@ -446,14 +403,13 @@ export class Game {
   _reconcile(server, ackSeq) {
     const wasAlive = this.meServer ? this.meServer.alive : true;
     // Taking damage used to produce literally nothing — you died without ever
-    // knowing you were being shot. Surface it as shake + a feedback event.
-    // Only fire the hurt feedback here if the local prediction didn't already
-    // cover it — otherwise every incoming shell thumped twice, ~1 RTT apart, and
-    // sustained fire read as double the damage it actually was.
-    // (the echo that releases the ledger entry arrives one frame BEFORE the
-    // snapshot carrying the lower HP, so this checks a timestamp, not the ledger)
+    // knowing you were being shot. Surface it as shake + a feedback event — but
+    // exactly ONCE per hit: the contact beat usually already played when the shell
+    // visibly touched us (see _endShell), and this snapshot arrives ~1 RTT later.
+    // Without the stamp, sustained fire thumped twice per shell.
     if (server.alive && server.hp < this.lastHp
-        && performance.now() - this._selfHitAt > PREDICT_TTL_MS) {
+        && performance.now() - this._selfFeedbackAt > SELF_FEEDBACK_MS) {
+      this._selfFeedbackAt = performance.now();
       this.shake = Math.max(this.shake, 7);
       this.events.push({ kind: 'hurt' });
     }
@@ -464,10 +420,11 @@ export class Game {
       return;
     }
     if (!server.alive) {
-      // dead: no prediction; camera stays where we died
+      // Dead — and the SERVER said so; our own death is never asserted locally.
+      // Camera stays where we died.
       this.pending.length = 0;
       this.me.vx = 0; this.me.vy = 0;
-      if (wasAlive && !this._deathPredicted(this.myId)) {
+      if (wasAlive) {
         this.effects.push({ kind: 'explosion', x: this.me.x, y: this.me.y, born: performance.now(), dur: 600, team: this.myTeam });
         this.shake = Math.max(this.shake, 14);
         this.hitstopMs = 70;   // the freeze is what sells the impact
@@ -593,7 +550,6 @@ export class Game {
         if (msg.id === this.myId && this.shells.has(mineKey)) {
           const s = this.shells.get(mineKey);
           this.shells.delete(mineKey);
-          for (const p of this._pending) if (p.key === mineKey) p.key = msg.bid;
           s.key = msg.bid;
           s.confirmed = true;
           this.shells.set(msg.bid, s);
@@ -604,8 +560,8 @@ export class Game {
         // Remote shot. It was fired `age` ago on the render timeline, so catch it
         // up to now in one go rather than parking it on a per-bullet cursor.
         const s = this._spawnShell(msg.bid, msg.x, msg.y, msg.a, msg.id, true);
-        const ageMs = this.net.serverNowMs() - INTERP_DELAY_MS - msg.tick * DT * 1000;
-        if (ageMs > 0 && !this._advance(s, Math.min(ageMs, 400) / 1000)) this._endShell(s, 0, 0);
+        const ageMs = this.net.serverNowMs() - this.net.interpDelayMs() - msg.tick * DT * 1000;
+        if (ageMs > 0 && !this._advance(s, Math.min(ageMs, 400) / 1000)) this._endShell(s, 0);
         this.effects.push({ kind: 'muzzle', x: msg.x, y: msg.y, a: msg.a, born: performance.now(), dur: 90 });
         this.events.push({ kind: 'fire', key: msg.id, x: msg.x });
         // Tower shots drive the tower barrel's aim and recoil.
@@ -616,64 +572,88 @@ export class Game {
         break;
       }
       case 'bx': {
+        // THE CONSEQUENCE CHANNEL. Everything that asserts a fact — damage dealt,
+        // tower credit, the confirm beat — happens here and only here.
         const s = this.shells.get(msg.bid);
         // a bullet retired because its owner left carries no `tower` field
         const tower = msg.tower ?? -1;
         this.shells.delete(msg.bid);
-        if (s && s.dead) {
-          // We already played this the moment it connected on screen. Swallow the
-          // echo if it agrees; if it does not — a shell we called a tank hit that
-          // actually struck a TOWER — drop the phantom damage and play the truth,
-          // so the objective never takes damage in silence.
-          // release either way: confirmed HP is about to arrive in the snapshot,
-          // and a misprediction must not keep charging damage that never happened
-          this._releasePending(s.key);
-          if (msg.hit === s.hitId && tower === s.hitTower) break;
-        }
+        const now = performance.now();
         // Burst where OUR copy of the shell is: the client copy deliberately runs
         // ~1 RTT ahead of the server's authoritative position, so msg.x/msg.y put
         // the explosion ~34px behind the shell at 80ms one-way.
         const ex = s ? s.x : msg.x;
         const ey = s ? s.y : msg.y;
+        const mine = !!(s && s.mine);
+
+        // Confirm beat: the server ruled MY shell hit an enemy. This is the moment
+        // damage became real, so the hitmarker and damage number live here.
+        if (mine && msg.hit && msg.hit !== this.myId) {
+          this.effects.push({ kind: 'confirm', x: ex, y: ey, born: now, dur: 400, dmg: BULLET_DAMAGE });
+          this.events.push({ kind: 'confirm', key: msg.hit, x: ex });
+        }
+        // Tower damage credit — authoritative; skip if already tallied at contact.
+        if (tower >= 0 && mine && !s.counted && tower !== this.myTeam) {
+          this.matchTowerDamage += BULLET_DAMAGE;
+        }
+
+        // Contact feedback: skip only if the local contact already played AND told
+        // the same story. hitTower === -2 means we retired silently near a tank
+        // (ambiguous) — contact never played, so the echo speaks in full.
+        const played = !!(s && s.dead && s.hitTower !== -2);
+        if (played && msg.hit === s.hitId && tower === s.hitTower) break;
         this.effects.push({
           kind: msg.hit ? 'hit' : 'poof',
-          x: ex, y: ey, born: performance.now(), dur: msg.hit ? 450 : 250,
+          x: ex, y: ey, born: now, dur: msg.hit ? 450 : 250,
         });
         if (tower >= 0) {
-          if (s && s.mine && !s.counted && tower !== this.myTeam) this.matchTowerDamage += BULLET_DAMAGE;
           this.shake = Math.max(this.shake, 5);
           this.events.push({ kind: 'towerhit', key: tower, x: ex });
+        } else if (msg.hit === this.myId) {
+          // one hurt beat per hit — the contact path may have covered it already
+          if (now - this._selfFeedbackAt > SELF_FEEDBACK_MS) {
+            this._selfFeedbackAt = now;
+            this.shake = Math.max(this.shake, 7);
+            this.events.push({ kind: 'hurt', key: msg.hit, x: ex });
+          }
         } else if (msg.hit) {
-          this.events.push({ kind: msg.hit === this.myId ? 'hurt' : 'hit', key: msg.hit, x: ex });
+          this.events.push({ kind: 'hit', key: msg.hit, x: ex });
         } else {
           this.events.push({ kind: 'bounce', key: msg.bid, x: ex });
         }
         break;
       }
-      case 'death':
+      case 'death': {
+        // ALWAYS authoritative, never suppressed: the only path that can explode a
+        // tank, so a kill can never be shown and then taken back.
+        const enemy = (this.teams.get(msg.victim) ?? 0) !== this.myTeam || msg.victim === this.myId;
         if (msg.victim === this.myId) {
           this.matchDeaths += 1;
           this.respawnCountdown = performance.now() + RESPAWN_DELAY * 1000;
           this.killedBy = this.names.get(msg.killer) || (msg.killer >= 200 ? 'a tower' : '');
-        } else if (msg.killer === this.myId && !this._deathPredicted(msg.victim)) {
-          // A kill is the emotional peak of the match and it used to get less
-          // feedback than being killed did: 4px of shake against 14px + a
-          // full-screen vignette. Match the weight.
+        } else if (msg.killer === this.myId && enemy) {
+          // A kill is the emotional peak of the match. (Teamkills get the feed row
+          // below but no banner and no sting — the server refuses the point too.)
           this.shake = Math.max(this.shake, 10);
-          this.hitstopMs = Math.max(this.hitstopMs, 55);
+          this.hitstopMs = Math.max(this.hitstopMs, 30);
           this.killBannerAt = performance.now();
           this.killBannerName = this.names.get(msg.victim) || '';
           this.events.push({ kind: 'kill' });
         }
-        // Without this the 37-particle death burst only ever fired for YOUR own
-        // death: a remote tank just silently vanished.
-        if (msg.victim !== this.myId && !this._deathPredicted(msg.victim)) {
+        if (msg.victim !== this.myId) {
+          // Explode at the position the victim is DRAWN this frame — the latest
+          // snapshot is ~interp-delay ahead of the rendered tank, so using it put
+          // the explosion visibly in front of the sprite.
+          const pool = this._remotePool.get(msg.victim);
           const buf = this.remotes.get(msg.victim);
           const last = buf && buf.length ? buf[buf.length - 1] : null;
-          if (last) {
+          const px = pool && pool.hasPrev ? pool.rawX + pool.errX : (last ? last.x : msg.x ?? null);
+          const py = pool && pool.hasPrev ? pool.rawY + pool.errY : (last ? last.y : msg.y ?? null);
+          if (px !== null && px !== undefined) {
             this.effects.push({
-              kind: 'explosion', x: last.x, y: last.y,
-              born: performance.now(), dur: 600, team: last.team,
+              kind: 'explosion', x: px, y: py,
+              born: performance.now(), dur: 600,
+              team: this.teams.get(msg.victim) ?? (last ? last.team : 0),
             });
             this.shake = Math.max(this.shake, 6);
           }
@@ -687,16 +667,12 @@ export class Game {
         });
         if (this.feed.length > 3) this.feed.shift();
         break;
+      }
       case 'spawn': {
         const buf = this.remotes.get(msg.id);
         if (buf) buf.length = 0; // don't interpolate across a teleport
         this._breakSmoothing(msg.id);
-        this._predDead.delete(msg.id);
-        // a fresh tank starts on full HP: nothing predicted about the old one applies
-        for (let i = this._pending.length - 1; i >= 0; i--) {
-          if (this._pending[i].victim === msg.id) this._pending.splice(i, 1);
-        }
-        if (msg.id === this.myId) { this._resetMagazine(); this._selfHitAt = -1e9; }
+        if (msg.id === this.myId) { this._resetMagazine(); this._selfFeedbackAt = -1e9; }
         this.effects.push({ kind: 'spawn', x: msg.x, y: msg.y, born: performance.now(), dur: 500 });
         break;
       }
@@ -717,8 +693,9 @@ export class Game {
 
   // ---------- per-render-frame ----------
   frame(dtSec = 1 / 60) {
-    const renderMs = this.net.serverNowMs() - INTERP_DELAY_MS;
+    const renderMs = this.net.serverNowMs() - this.net.interpDelayMs();
     const now = performance.now();
+    const kOff = Math.exp(-dtSec / ERR_HALFLIFE);
 
     // Every shell, live or spent, on one clock: real elapsed frame time. No
     // per-bullet cursor, no dormancy, no second timeline to disagree with.
@@ -732,13 +709,9 @@ export class Game {
       // post-step position only covers one tick (29px at 1750 px/s), so on a
       // 30 fps phone half the shell's motion went untested.
       s.prevX = s.x; s.prevY = s.y;
-      if (!this._advance(s, Math.min(dtSec, 0.1))) this._endShell(s, 0, 0);
-    }
-
-    // Drop predicted damage the server never confirmed (a graze we called a hit).
-    const cutoff = now - PREDICT_TTL_MS;
-    for (let i = this._pending.length - 1; i >= 0; i--) {
-      if (this._pending[i].at <= cutoff) this._pending.splice(i, 1);
+      // the cosmetic barrel offset eases out over the first frames of flight
+      s.drawOffX *= kOff; s.drawOffY *= kOff;
+      if (!this._advance(s, Math.min(dtSec, 0.1))) this._endShell(s, 0);
     }
 
     // Decay the correction offset on WALL CLOCK, not per frame. `*= 0.86` per frame
@@ -820,9 +793,14 @@ export class Game {
       st.x = x + st.errX; st.y = y + st.errY;
       st.vx = b.vx; st.vy = b.vy;
       st.hull = hull; st.turret = turret;
-      st.hp = this.displayHp(id, b.hp);
-      if (b.alive && b.hp > 0) this._releaseDeath(id);
-      st.alive = b.alive && !this._deathPredicted(id);
+      // Authoritative hp/alive, always — the server is the only thing that can
+      // kill a tank, so a kill can never be shown and then taken back. The BAR
+      // eases toward the authoritative value so a confirmed hit reads as a drop,
+      // not a step (display only; nothing reads dispHp back).
+      st.hp = b.hp;
+      if (st.dispHp === undefined || !b.alive) st.dispHp = b.hp;
+      else st.dispHp += (b.hp - st.dispHp) * (1 - Math.exp(-dtSec / HP_SMOOTH_S));
+      st.alive = b.alive;
       st.score = b.score; st.team = b.team;
       st.name = this.names.get(id) || '?';
       out.push(st);

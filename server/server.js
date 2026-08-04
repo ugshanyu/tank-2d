@@ -377,11 +377,17 @@ function tryFire(room, p, inp) {
   const a = inp.aim;
   const x = p.tank.x + Math.cos(a) * MUZZLE_OFFSET;
   const y = p.tank.y + Math.sin(a) * MUZZLE_OFFSET;
+  // The client reports its view lag at SEND time; the ticks this input then sat
+  // in the jitter buffer are additional lag it could not know about (up to 6
+  // ticks ≈ 20px at tank speed). -1 because arrival lands mid-interval — without
+  // it the common 1-tick delta double-counts ~8ms. Re-clamp the SUM so the
+  // rewind can never wrap the 32-tick history ring.
+  const queueTicks = inp.arrivalTick === undefined ? 0 : Math.max(0, tick - inp.arrivalTick - 1);
   const b = {
     id: room.nextBulletId++, owner: p.id, x, y,
     vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
     age: 0, bounces: 0,
-    lag: Math.max(0, Math.min(MAX_LAG_TICKS, inp.lagTicks | 0)),
+    lag: Math.max(0, Math.min(MAX_LAG_TICKS, (inp.lagTicks | 0) + queueTicks)),
   };
   room.bullets.push(b);
   room.broadcastJson({
@@ -411,7 +417,13 @@ function applyDamage(room, victim, killerId) {
   if (killer && killer !== victim && killer.tank.team !== t.team) {
     killer.tank.score = Math.min(255, killer.tank.score + 1);
   }
-  room.broadcastJson({ t: 'death', victim: victim.id, killer: killerId });
+  // x,y: fallback explosion position for a client that has no interpolation
+  // state for the victim yet (just joined / victim never entered a snapshot).
+  // Clients with state prefer the position they are DRAWING the victim at.
+  room.broadcastJson({
+    t: 'death', victim: victim.id, killer: killerId,
+    x: Math.round(t.x), y: Math.round(t.y),
+  });
 }
 
 // drift-corrected global tick loop
@@ -571,6 +583,10 @@ wss.on('connection', (ws, req) => {
     const type = v.getUint8(0);
     if (type === MSG.INPUT && buf.length >= 11) {
       const inp = decodeInput(v);
+      // Stamp arrival: the jitter buffer can hold an input for several ticks
+      // before it is processed, and that wait is view lag the client cannot
+      // measure — tryFire folds it into the rewind.
+      inp.arrivalTick = tick;
       if (player.inputQueue.length >= INPUT_QUEUE_CAP) player.inputQueue.shift();
       player.inputQueue.push(inp);
     } else if (type === MSG.PING && buf.length >= 9) {

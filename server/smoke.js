@@ -142,126 +142,150 @@ function checkProtocol() {
   check(rt(-5) === 0, 'negative lagTicks clamped');
 }
 
-// Client-side hit prediction: the impact must play the instant the shell connects
-// on screen, and the server's echo must then be swallowed rather than replayed.
+// The authority contract: the client renders CONTACT instantly (sparks, sound,
+// shake — things a graze also produces) but only the server declares CONSEQUENCE
+// (health, explosions, kill credit). A kill must be IMPOSSIBLE to un-happen.
 // game.js imports only pure modules, so it runs headless.
-async function checkInstantHits() {
+async function checkAuthorityContract() {
   const { Game } = await import('../client/js/game.js');
-  const newGame = () => new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const newGame = () => new Game({
+    sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0,
+    interpDelayMs: () => 100,
+  });
   const g = newGame();
   g.myId = 1;
 
-  // a shell of mine, fired but not yet acknowledged by the server
+  // ---- contact: instant, once, and consequence-free ----
   const s = g._spawnShell('n7', 100, 100, 0, 1, false);
   s.vx = 0; s.vy = 0;
-  g._endShell(s, 2, 100);
-  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'impact plays immediately on a local hit');
-  check(g.events.filter((e) => e.kind === 'hit').length === 1, 'hit sound/haptic fires immediately');
-  check(!g.renderShells().includes(s), 'locally-resolved shell stops being drawn at once');
+  g._endShell(s, 2);
+  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'contact spark plays immediately');
+  check(g.events.filter((e) => e.kind === 'hit').length === 1, 'contact sound fires immediately');
+  check(!g.renderShells().includes(s), 'the spent shell stops being drawn at once');
+  check(!g.effects.some((e) => e.kind === 'explosion' || e.kind === 'confirm'),
+    'contact asserts NOTHING: no explosion, no confirm marker');
+  g._endShell(s, 2);
+  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'contact is idempotent across frames');
 
-  // the same shot is idempotent if the frame runs twice
-  g._endShell(s, 2, 100);
-  check(g.effects.filter((e) => e.kind === 'hit').length === 1, 'local hit is not double-played');
-
-  // THE TWO-SHELL BUG: the fire echo must adopt the shell I already have, never
-  // spawn a second one — even though this one is already spent.
+  // ---- the fire echo re-keys, never respawns (the two-shell bug) ----
   g.onEvent({ t: 'fire', id: 1, bid: 55, nonce: 7, x: 100, y: 100, a: 0, tick: 0 });
   check(g.shells.size === 1 && g.shells.get(55) === s,
     `one trigger pull is exactly one shell (${g.shells.size} in flight)`);
-  check(g.renderShells().length === 0, 'and a resolved shell is never resurrected on screen');
+  check(g.renderShells().length === 0, 'a resolved shell is never resurrected on screen');
 
-  // ...and the impact echo must be swallowed, not replayed
-  const before = g.effects.length;
-  const evBefore = g.events.length;
+  // ---- bx = the consequence channel ----
+  // Agreement: contact effects are swallowed, but the CONFIRM beat still plays —
+  // it is the one symbol that only ever appears when damage really landed.
+  const before = g.effects.filter((e) => e.kind === 'hit').length;
   g.onEvent({ t: 'bx', bid: 55, x: 100, y: 100, hit: 2, tower: -1 });
-  check(g.effects.length === before, 'server bx echo does not double-flash the impact');
-  check(g.events.length === evBefore, 'server bx echo does not double-play the sound');
+  check(g.effects.filter((e) => e.kind === 'hit').length === before,
+    'agreeing echo does not double-flash the contact');
+  check(g.effects.filter((e) => e.kind === 'confirm').length === 1,
+    'server-confirmed damage draws exactly one hitmarker');
+  check(g.events.filter((e) => e.kind === 'confirm').length === 1, 'and one confirm sound');
   check(!g.shells.has(55), 'shell gone after the echo');
 
-  // a live shell of mine that the echo arrives for keeps flying as ONE object
+  // a live shell of mine is re-keyed in place by the echo
   const live = g._spawnShell('n8', 300, 300, 0, 1, false);
   g.onEvent({ t: 'fire', id: 1, bid: 60, nonce: 8, x: 10, y: 10, a: 0, tick: 0 });
   check(g.shells.size === 1 && g.shells.get(60) === live && live.x === 300,
     'an in-flight shell is re-keyed in place, not respawned at the muzzle');
-  check(g.renderShells().length === 1, 'so only one shell is ever drawn per shot');
 
-  // an UNPREDICTED hit still plays normally from the server
+  // an impact the client never saw locally still plays in full from the server
   g._spawnShell(56, 5, 5, 0, 2, true);
-  const fx56 = g.effects.length;
+  const fx56 = g.effects.filter((e) => e.kind === 'hit').length;
   g.onEvent({ t: 'bx', bid: 56, x: 5, y: 5, hit: 1, tower: -1 });
-  check(g.effects.length === fx56 + 1, 'server-only impacts still play');
+  check(g.effects.filter((e) => e.kind === 'hit').length === fx56 + 1, 'server-only impacts still play');
 
-  // ---- predicted damage: the health bar must move on impact ----
+  // ---- health is authoritative, always ----
   const g2 = newGame();
-  g2.myId = 1;
-  check(g2.displayHp(2, 100) === 100, 'undamaged tank shows server hp');
-  const s2 = g2._spawnShell('n1', 0, 0, 0, 1, false);
-  g2._endShell(s2, 2, 100);
-  check(g2.displayHp(2, 100) === 100 - BULLET_DAMAGE, 'health drops immediately on a predicted hit');
-  // the echo releases the prediction; authoritative HP takes over cleanly
-  g2.onEvent({ t: 'fire', id: 1, bid: 11, nonce: 1, x: 0, y: 0, a: 0, tick: 0 });
-  g2.onEvent({ t: 'bx', bid: 11, x: 0, y: 0, hit: 2, tower: -1 });
-  check(g2.displayHp(2, 100 - BULLET_DAMAGE) === 100 - BULLET_DAMAGE, 'server hp takes over when it lands');
-  check(g2.displayHp(2, 100) === 100, 'prediction released once confirmed');
-
-  // A BURST MOVES THE BAR BUT MUST NOT INVENT A KILL. Every local hit docks health
-  // immediately — that is cheap and self-corrects. The DEATH does not fire off a
-  // stack of unconfirmed hits: on a 200ms link the local verdict and the server's
-  // rewound one disagree often enough that a tank would explode and then get back
-  // up, which is far worse than a kill that lands a beat late.
-  const g5 = newGame();
-  g5.myId = 1; g5.teams.set(2, 1);
+  g2.myId = 1; g2.teams.set(2, 1);
   const shells = Math.ceil(MAX_HP / BULLET_DAMAGE);
   for (let i = 0; i < shells; i++) {
-    const b = g5._spawnShell(`n${i}`, 0, 0, 0, 1, false);
-    g5._endShell(b, 2, MAX_HP);          // server still reports the target at full hp
+    const b = g2._spawnShell(`n${i}`, 0, 0, 0, 1, false);
+    g2._endShell(b, 2);
   }
-  check(g5.displayHp(2, MAX_HP) === 0, 'a full burst drops the bar to zero on the shell that lands');
-  check(!g5.effects.some((e) => e.kind === 'explosion'),
-    'but a kill is NEVER predicted from hits the server has not confirmed');
+  check(!g2.effects.some((e) => e.kind === 'explosion'),
+    'a full burst of local contacts NEVER invents a kill');
+  // remoteStates must report the server's hp/alive verbatim
+  g2.remotes.set(2, Object.assign(
+    [{ tMs: 0, x: 0, y: 0, vx: 0, vy: 0, hull: 0, turret: 0, hp: MAX_HP, alive: true, score: 0, team: 1 }],
+    { seen: 0 },
+  ));
+  const st = g2.remoteStates(0)[0];
+  check(st.hp === MAX_HP && st.alive === true,
+    'a tank the server says is alive at full hp is drawn exactly that way');
 
-  // ...and once the server's own hp says the next shell is lethal, it IS instant
+  // ---- death: only the server can explode a tank, and it always does ----
   const g7 = newGame();
-  g7.myId = 1; g7.teams.set(2, 1);
-  const last = g7._spawnShell('n1', 50, 50, 0, 1, false);
-  g7._endShell(last, 2, BULLET_DAMAGE);  // authoritative hp: one shell from death
-  check(g7.effects.some((e) => e.kind === 'explosion'),
-    'the killing blow explodes on the frame it lands, not a round trip later');
+  g7.myId = 1; g7.teams.set(2, 1); g7.names.set(2, 'victim');
+  g7.remotes.set(2, Object.assign(
+    [{ tMs: 0, x: 40, y: 40, vx: 0, vy: 0, hull: 0, turret: 0, hp: 10, alive: true, score: 0, team: 1 }],
+    { seen: 0 },
+  ));
+  g7.onEvent({ t: 'death', victim: 2, killer: 1 });
+  check(g7.effects.some((e) => e.kind === 'explosion'), 'the death event always explodes');
+  check(g7.events.some((e) => e.kind === 'kill'), 'and credits the kill');
+  check(g7.killBannerAt > 0, 'and shows the banner');
+  check(g7.feed.length === 1, 'and records the feed row');
 
-  // a prediction the server never confirms must expire on its own
-  const g6 = newGame();
-  g6.myId = 1;
-  const ghost = g6._spawnShell('n1', 0, 0, 0, 1, false);
-  g6._endShell(ghost, 3, 100);
-  check(g6.displayHp(3, 100) < 100, 'a graze docks health immediately');
-  g6._pending[0].at -= 5000;                    // pretend the echo never came
-  check(g6.displayHp(3, 100) === 100, 'an unconfirmed prediction expires instead of sticking');
+  // ---- a TEAMKILL gets the feed row but no banner, sting or +1 ----
+  const g8 = newGame();
+  g8.myId = 1; g8.myTeam = 0; g8.teams.set(3, 0); g8.names.set(3, 'buddy');
+  g8.onEvent({ t: 'death', victim: 3, killer: 1 });
+  check(!g8.events.some((e) => e.kind === 'kill') && g8.killBannerAt < 0,
+    'a teamkill never plays the kill sting or banner');
+  check(g8.feed.length === 1, 'but the feed still tells the truth');
 
-  // ---- taking a hit must not double-fire the hurt feedback ----
+  // ---- exactly one hurt beat per hit taken, whichever path sees it first ----
   const g3 = newGame();
   g3.myId = 1;
   g3.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 0 };
   g3.lastHp = 100;
   g3.me = { x: 0, y: 0, vx: 0, vy: 0, hull: 0 };
   const incoming = g3._spawnShell(9, 0, 0, 0, 2, true);
-  g3._endShell(incoming, 1, 100);              // shell hits ME, resolved locally
-  const hurtAfterPredict = g3.events.filter((e) => e.kind === 'hurt').length;
+  g3._endShell(incoming, 1);                   // shell visibly touches ME
+  const hurtA = g3.events.filter((e) => e.kind === 'hurt').length;
   g3.onEvent({ t: 'bx', bid: 9, x: 0, y: 0, hit: 1, tower: -1 });
   g3._reconcile({ hp: 100 - BULLET_DAMAGE, alive: true, x: 0, y: 0, vx: 0, vy: 0, hull: 0 }, 0);
-  const hurtAfterServer = g3.events.filter((e) => e.kind === 'hurt').length;
-  check(hurtAfterPredict === 1, 'taking a hit fires hurt feedback once, immediately');
-  check(hurtAfterServer === 1, 'server confirmation does NOT replay the hurt feedback');
+  const hurtB = g3.events.filter((e) => e.kind === 'hurt').length;
+  check(hurtA === 1, 'contact-detected hit: hurt plays once, immediately');
+  check(hurtB === 1, 'the bx echo and the snapshot do NOT replay it');
+  // graze path: contact never fired, so the echo owns the beat — still exactly one
+  const g3b = newGame();
+  g3b.myId = 1;
+  g3b.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 0 };
+  g3b.lastHp = 100;
+  g3b.me = { x: 0, y: 0, vx: 0, vy: 0, hull: 0 };
+  g3b.onEvent({ t: 'bx', bid: 12, x: 0, y: 0, hit: 1, tower: -1 });
+  g3b._reconcile({ hp: 100 - BULLET_DAMAGE, alive: true, x: 0, y: 0, vx: 0, vy: 0, hull: 0 }, 0);
+  check(g3b.events.filter((e) => e.kind === 'hurt').length === 1,
+    'a graze (no local contact) still hurts exactly once');
 
-  // ---- a wrong-victim prediction must not swallow the real event ----
+  // ---- a wrong local verdict never swallows the truth ----
   const g4 = newGame();
   g4.myId = 1;
   const wrong = g4._spawnShell(70, 0, 0, 0, 1, true);
-  g4._endShell(wrong, 2, 100);                  // we guessed it hit tank 2
+  g4._endShell(wrong, 2);                       // we thought it grazed tank 2
   const fx = g4.effects.length;
-  g4.onEvent({ t: 'bx', bid: 70, x: 0, y: 0, hit: 0, tower: 1 });  // it actually hit a TOWER
-  check(g4.effects.length > fx, 'a mispredicted shell still plays the real impact');
-  check(g4.events.some((e) => e.kind === 'towerhit'), 'tower damage is never silent after a misprediction');
-  check(g4.displayHp(2, 100) === 100, 'and the phantom damage is released');
+  g4.onEvent({ t: 'bx', bid: 70, x: 0, y: 0, hit: 0, tower: 1 });  // it hit a TOWER
+  check(g4.effects.length > fx, 'a wrong local verdict still plays the real impact');
+  check(g4.events.some((e) => e.kind === 'towerhit'), 'tower damage is never silent');
+
+  // ---- ambiguous tower contact defers to the server ----
+  const g9 = newGame();
+  g9.myId = 1;
+  // a living remote sits right next to the tower impact point
+  g9.remotes.set(2, Object.assign(
+    [{ tMs: 0, x: 360, y: 1108, vx: 0, vy: 0, hull: 0, turret: 0, hp: 50, alive: true, score: 0, team: 1 }],
+    { seen: 0 },
+  ));
+  const amb = g9._spawnShell('n1', 360, 1105, 0, 1, false);
+  amb.x = 360; amb.y = 1105; amb.prevX = 360; amb.prevY = 1060;  // at the BLUE tower rim
+  g9._endShell(amb, 0);
+  check(!g9.events.some((e) => e.kind === 'towerhit'),
+    'tower feedback is withheld when a tank is close enough to dispute it');
+  check(amb.dead, 'but the shell still retires');
 }
 
 // The duplicate-shell bug only appeared when the server's `fire` echo arrived
@@ -284,6 +308,7 @@ async function checkLiveShells(port) {
     serverNowMs: () => snapTick * DT * 1000 + (Date.now() - snapAt),
     rtt: 120,
     viewLagTicks: () => 10,
+    interpDelayMs: () => 100,
   });
 
   let spawned = 0, fireEchoes = 0, maxLive = 0;
@@ -343,6 +368,117 @@ async function checkLiveShells(port) {
   await sim.close();
 }
 
+// THE REPORTED BUG, asserted at state level: a tank drawn dead must stay dead
+// until a real respawn. A live Game client joins a bot room over a degraded link
+// and watches remoteStates for the whole run: any dead->alive flip faster than a
+// respawn means the client asserted a kill the server never confirmed.
+async function checkNoRevives(port) {
+  const { Game } = await import('../client/js/game.js');
+  const { startNetSim } = await import('./netsim.js');
+  const sim = startNetSim({ listenPort: 8126, targetPort: port, latencyMs: 60, jitterMs: 20 });
+
+  const ws = new WebSocket(`ws://127.0.0.1:8126/ws?token=${encodeURIComponent('dev:reviveprobe:botroom2')}`);
+  ws.binaryType = 'arraybuffer';
+  let snapTick = 0, snapAt = Date.now();
+  const game = new Game({
+    sendInput: (seq, mx, my, f, aim, nonce, lag) => {
+      if (ws.readyState === 1) ws.send(encodeInput(seq, mx, my, f, aim, nonce, lag));
+    },
+    serverNowMs: () => snapTick * DT * 1000 + (Date.now() - snapAt),
+    rtt: 120, viewLagTicks: () => 10, interpDelayMs: () => 100,
+  });
+
+  await new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error('revive probe connect timeout')), 5000);
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe' })));
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) {
+        const msg = JSON.parse(data.toString());
+        game.onEvent(msg);
+        if (msg.t === 'welcome') { clearTimeout(to); resolve(); }
+        return;
+      }
+      const buf = Buffer.from(data);
+      const v = new DataView(buf.buffer, buf.byteOffset, buf.length);
+      if (v.getUint8(0) === MSG.SNAPSHOT) {
+        const snap = decodeSnapshot(v);
+        snapTick = snap.tick; snapAt = Date.now();
+        game.onSnapshot(snap);
+      }
+    });
+    ws.on('error', reject);
+  });
+
+  const ka = setInterval(() => { if (ws.readyState === 1) ws.send(encodePing(Date.now())); }, 2000);
+  const deadSince = new Map();   // id -> when we first drew it dead
+  let revives = 0, deathsSeen = 0, fastest = Infinity;
+  const runMs = 15000;           // bots fight (3-shell kills): deaths WILL happen
+  const t0 = Date.now();
+  while (Date.now() - t0 < runMs) {
+    if (game.me) game.tick({ moveX: 0, moveY: 0, firing: false }, 0);
+    const renderMs = game.frame(DT);
+    for (const st of game.remoteStates(renderMs, DT)) {
+      const was = deadSince.get(st.id);
+      if (!st.alive && was === undefined) { deadSince.set(st.id, Date.now()); deathsSeen++; }
+      if (st.alive && was !== undefined) {
+        const deadFor = Date.now() - was;
+        deadSince.delete(st.id);
+        fastest = Math.min(fastest, deadFor);
+        // a REAL respawn takes RESPAWN_DELAY (2.5s); anything much faster is the
+        // client walking back a kill it invented. 60% leaves room for clock skew.
+        if (deadFor < RESPAWN_DELAY * 1000 * 0.6) revives++;
+      }
+    }
+    await sleep(1000 * DT);
+  }
+  check(deathsSeen > 0, `the probe watched real deaths happen (${deathsSeen} observed)`);
+  check(revives === 0,
+    `zero revives: no tank was ever drawn dead then alive early (fastest respawn ${Number.isFinite(fastest) ? Math.round(fastest) : '—'}ms)`);
+
+  clearInterval(ka);
+  ws.close();
+  await sim.close();
+}
+
+// Adaptive interpolation delay: pure math on the offset ring, tested by feeding
+// _updateClock a synthetic 60Hz snapshot stream with controlled jitter.
+async function checkAdaptiveInterp() {
+  const { Net } = await import('../client/js/net.js');
+  const mkNet = () => {
+    // a resolveUrl that never resolves: full Net instance, no socket
+    const n = new Net(() => new Promise(() => {}), { name: 't', onSnapshot() {}, onEvent() {}, onStatus() {} });
+    n._clockInit = false; n._offCount = 0; n._offIdx = 0;
+    return n;
+  };
+  const realNow = performance.now.bind(performance);
+  const feed = (n, ticks, jitterFn) => {
+    for (let i = 0; i < ticks; i++) {
+      const arrival = i * DT * 1000 + 80 + jitterFn(i);
+      performance.now = () => arrival;
+      n._updateClock(i);
+    }
+    performance.now = realNow;
+  };
+
+  try {
+    const clean = mkNet();
+    feed(clean, 400, () => 0);                      // ~6.7s of perfectly paced snapshots
+    check(clean.interpDelayMs() >= 50 && clean.interpDelayMs() <= 62,
+      `clean link: interp shrinks to the floor (${Math.round(clean.interpDelayMs())}ms)`);
+    check(clean.viewLagTicks() === Math.round(clean.interpDelayMs() / (DT * 1000)),
+      'the server is told to rewind to the SAME adapted delay');
+
+    const bursty = mkNet();
+    feed(bursty, 400, (i) => (i % 3 === 0 ? 80 * Math.random() : 0));  // 40ms-avg bursts
+    check(bursty.interpDelayMs() > clean.interpDelayMs() + 15,
+      `bursty link keeps a bigger buffer (${Math.round(bursty.interpDelayMs())}ms vs ${Math.round(clean.interpDelayMs())}ms)`);
+    check(bursty.interpDelayMs() <= 150, 'and never exceeds the ceiling');
+    clean.close(); bursty.close();
+  } finally {
+    performance.now = realNow;
+  }
+}
+
 // Progression is local-only, so its correctness is entirely in this module:
 // a non-monotonic curve or a lossy save is invisible until a player loses a level.
 async function checkProfile() {
@@ -388,7 +524,7 @@ async function checkProfile() {
 // the server resets the match 6s later — the whole match used to vanish).
 async function checkAward() {
   const { Game } = await import('../client/js/game.js');
-  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0, interpDelayMs: () => 100 });
   g.myId = 1; g.myTeam = 0;
   g.meServer = { hp: 100, alive: true, ammo: 5, team: 0, score: 4 };
   g.matchDeaths = 2;
@@ -406,7 +542,7 @@ async function checkAward() {
     'the pending award survives the match reset that follows it');
 
   // joining DURING a result screen must not render or award someone else's match
-  const g2 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g2 = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0, interpDelayMs: () => 100 });
   g2.onEvent({ t: 'welcome', id: 1, team: 0, players: [], wins: [3, 2], phase: 'over' });
   check(g2.winner === -1 && !g2.pendingAward,
     'joining mid-result screen awards nothing and has no winner to render');
@@ -607,25 +743,27 @@ async function checkCombatRules() {
   check(!alive && b.vx > 0, `a shell dies at the wall instead of coming back (vx stayed ${Math.sign(b.vx)})`);
 
   const { Game } = await import('../client/js/game.js');
-  const g = new Game({ sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0 });
+  const g = new Game({
+    sendInput() {}, serverNowMs: () => 0, rtt: 0, viewLagTicks: () => 0,
+    interpDelayMs: () => 100,
+  });
   g.myId = 1; g.myTeam = 0;
   g.teams.set(2, 1);
   g.names.set(2, 'victim');
 
-  // last shell of four: the target is on BULLET_DAMAGE hp, so this kills.
+  // The killing shell: local contact plays the spark, and the kill itself comes
+  // from the server's death event — which under the authority contract arrives in
+  // the SAME network batch as the bx echo, and is played exactly once, in full.
   const shell = g._spawnShell(1, 50, 50, 0, 1, true);
-  g._endShell(shell, 2, BULLET_DAMAGE);
-  check(g.effects.some((e) => e.kind === 'explosion'), 'the killing hit explodes immediately, not a round trip later');
-  check(g.killBannerAt > 0 && g.events.some((e) => e.kind === 'kill'), 'the kill is credited on the spot');
+  g._endShell(shell, 2);
+  check(g.effects.some((e) => e.kind === 'hit'), 'the killing contact sparks immediately');
+  check(!g.effects.some((e) => e.kind === 'explosion'), 'but the explosion waits for the server');
+  g.onEvent({ t: 'bx', bid: 1, x: 50, y: 50, hit: 2, tower: -1 });
+  g.onEvent({ t: 'death', victim: 2, killer: 1, x: 50, y: 50 });
+  check(g.effects.filter((e) => e.kind === 'explosion').length === 1, 'the death event explodes exactly once');
+  check(g.killBannerAt > 0 && g.events.filter((e) => e.kind === 'kill').length === 1, 'the kill is credited exactly once');
   check(g.hitstopMs > 0, 'and it lands with hitstop');
-
-  // the server's own death event must then be swallowed, not replayed
-  const fx = g.effects.length;
-  const ev = g.events.length;
-  g.onEvent({ t: 'death', victim: 2, killer: 1 });
-  check(g.effects.length === fx, 'the server death event does not double-explode');
-  check(g.events.filter((e) => e.kind === 'kill').length === 1, 'nor double-credit the kill');
-  check(g.feed.length === 1, 'but the kill feed still records it exactly once');
+  check(g.feed.length === 1, 'and the kill feed records it exactly once');
 }
 
 async function main() {
@@ -633,7 +771,8 @@ async function main() {
   await checkServiceId();
   await checkTilt();
   await checkCombatRules();
-  await checkInstantHits();
+  await checkAuthorityContract();
+  await checkAdaptiveInterp();
   await checkProfile();
   await checkAuth();
   await checkAward();
@@ -832,6 +971,9 @@ async function botPhase() {
     check(revisit.id === 1, `abandoned room reclaimed, ids reset (got ${revisit.id})`);
     check(revisit.snap.tanks.length === 4, `refilled to 2v2 for the newcomer (${revisit.snap.tanks.length})`);
     revisit.close();
+
+    // ---- the reported bug, end to end: no tank ever revives on screen ----
+    await checkNoRevives(BOT_PORT);
   } finally {
     srv.kill();
   }

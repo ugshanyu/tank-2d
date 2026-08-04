@@ -319,7 +319,9 @@ function startNet(resolveUrl) {
       game.onEvent(m);
       if (m.t === 'welcome') toast(`You are on ${TEAM_NAMES[m.team ?? 0]} — destroy the enemy tower`, 2600);
       if (m.t === 'join' && m.id !== game.myId) toast(`${m.name} joined ${TEAM_NAMES[m.team ?? 0]}`, 1400);
-      if (m.t === 'death' && m.victim !== game.myId && m.killer === game.myId) toast('Kill! +1', 1200);
+      // no "+1" for a teamkill — the server refuses the point (friendly fire hurts, but doesn't score)
+      if (m.t === 'death' && m.victim !== game.myId && m.killer === game.myId
+          && (game.teams.get(m.victim) ?? 0) !== game.myTeam) toast('Kill! +1', 1200);
       if (m.t === 'matchstart') toast('New match — go!', 1600);
       if (m.t === 'error') toast(m.reason, 4000);
     },
@@ -347,6 +349,7 @@ function startNet(resolveUrl) {
   let last = performance.now();
   let acc = 0;
   let hudAt = 0;
+  let myDispHp = MAX_HP;   // displayed own hp — eases down toward authoritative
   // Pooled render state — this used to allocate ~55 objects every frame, which on
   // iOS Safari is a nursery collection (and a dropped frame) every couple of seconds.
   const mePos = { x: 0, y: 0, hull: 0 };
@@ -397,15 +400,20 @@ function startNet(resolveUrl) {
       mePos.x = game.me.x + game.errX + game.me.vx * acc;
       mePos.y = game.me.y + game.errY + game.me.vy * acc;
       mePos.hull = game.me.hull;
-      game.recordSelf(net.serverNowMs(), mePos.x, mePos.y);
+      // Record the RAW predicted position (no errX): incoming fire is judged by
+      // the server against its authoritative view of us, which our raw prediction
+      // tracks — the correction offset is purely how we're drawn.
+      game.recordSelf(net.serverNowMs(), game.me.x + game.me.vx * acc, game.me.y + game.me.vy * acc);
     }
     if (game.shake > 0) { renderer.addShake(game.shake); game.shake = 0; }
 
     drawState.me = game.meServer;
-    // Your OWN bar has to go through the prediction layer too. It was reading raw
-    // server HP, so the one health bar that matters most still lagged a round trip
-    // behind the impact — exactly the symptom the prediction was added to fix.
-    drawState.myHp = game.meServer ? game.displayHp(game.myId, game.meServer.hp) : MAX_HP;
+    // Own bar: AUTHORITATIVE hp, eased so a confirmed hit reads as a drop rather
+    // than a step. Snaps upward instantly (respawn/heal must not animate).
+    const hpTarget = game.meServer ? game.meServer.hp : MAX_HP;
+    myDispHp = hpTarget >= myDispHp ? hpTarget
+      : myDispHp + (hpTarget - myDispHp) * (1 - Math.exp(-(dt || 1 / 60) / 0.12));
+    drawState.myHp = myDispHp;
     drawState.meId = game.myId;
     drawState.meName = game.names.get(game.myId) || me.userName || '';
     drawState.mePos = game.me ? mePos : null;
@@ -438,7 +446,8 @@ function startNet(resolveUrl) {
 
   setInterval(() => {
     const el = $('pingv');
-    if (el && net) el.textContent = `${net.rtt} ms`;
+    // ping · adaptive interp buffer (how far in the past remotes render)
+    if (el && net) el.textContent = `${net.rtt} ms · ${Math.round(net.interpDelayMs())}`;
   }, 500);
 }
 

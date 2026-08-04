@@ -30,7 +30,8 @@ export class Net {
     this.onStatus = onStatus;     // ('connecting'|'connected'|'reconnecting') => void
     this.ws = null;
     this.connected = false;
-    this.rtt = 0;
+    this.rtt = 0;                 // median of the last few pings — one delayed
+    this._rttRing = [];           // pong must not yank the server's rewind depth
     this.closedByUs = false;
     this.backoff = 500;
     this.attempts = 0;
@@ -45,6 +46,12 @@ export class Net {
     this._offIdx = 0;
     this._offCount = 0;
     this._lastClockMs = 0;
+    // Adaptive interpolation delay: how far in the past remote entities render.
+    // Measured from real snapshot arrival spread instead of a fixed constant —
+    // a clean wifi link doesn't pay a cellular-sized buffer. Floor 50ms survives
+    // one dropped snapshot + render quantization without entering extrapolation.
+    this._interpMs = INTERP_DELAY_MS;
+    this._interpSince = 0;        // snapshots seen since the last retarget
     this._connecting = false;
     this._generation = 0;
     this.connect();
@@ -95,6 +102,11 @@ export class Net {
       this._clockInit = false;
       this._offCount = 0;
       this._offIdx = 0;
+      // new link, new statistics: fall back to the safe default until the ring refills
+      this._interpMs = INTERP_DELAY_MS;
+      this._interpTarget = undefined;
+      this._interpSince = 0;
+      this._rttRing.length = 0;
       ws.send(JSON.stringify({ t: 'hello', name: this.name }));
       clearInterval(this._pingTimer);
       this._pingTimer = setInterval(() => {
@@ -119,7 +131,11 @@ export class Net {
         this.onSnapshot(snap);
       } else if (type === MSG.PONG) {
         const { clientTimeMs } = decodePong(v);
-        this.rtt = Math.round(performance.now() - clientTimeMs);
+        const sample = Math.round(performance.now() - clientTimeMs);
+        this._rttRing.push(sample);
+        if (this._rttRing.length > 5) this._rttRing.shift();
+        const sorted = [...this._rttRing].sort((a, b) => a - b);
+        this.rtt = sorted[sorted.length >> 1];
       }
     };
 
@@ -200,10 +216,38 @@ export class Net {
     this._lastClockMs = now;
     const maxStep = 0.02 * dtMs;
     this.clockOffset += Math.sign(err) * Math.min(Math.abs(err), maxStep);
+
+    // ---- adaptive interpolation delay ----
+    // A snapshot is renderable once interp delay >= its excess transit delay
+    // d_i = target - off_i, so the window MAX of d (= spread of the offset ring)
+    // is exactly the buffer needed to render every snapshot of the last 2 s on
+    // time. Window-max, not a percentile: a percentile admits a steady trickle
+    // of extrapolation pops by construction. Retarget ~6x/s; slew ≤3%/s so
+    // renderMs (= serverNow - D) stays monotonic and the warp is imperceptible.
+    // Only adapt once the ring holds ≥1 s of data — a fresh connection's spread
+    // is meaninglessly small.
+    if (++this._interpSince >= 10 && this._offCount >= 60) {
+      this._interpSince = 0;
+      let min = Infinity;
+      for (let i = 0; i < this._offCount; i++) if (w[i] < min) min = w[i];
+      this._interpTarget = Math.max(50, Math.min(150, (target - min) + DT * 1000 + 8));
+    }
+    if (this._interpTarget) {
+      const dErr = this._interpTarget - this._interpMs;
+      const step = 0.03 * dtMs;
+      this._interpMs += Math.sign(dErr) * Math.min(Math.abs(dErr), step);
+    }
   }
 
   serverNowMs() {
     return performance.now() + this.clockOffset;
+  }
+
+  // How far in the past remote entities are rendered. Everything that touches the
+  // remote timeline — renderMs, shell catch-up, and the rewind depth the server
+  // is told about — MUST read this one accessor, or aim breaks systematically.
+  interpDelayMs() {
+    return this._interpMs;
   }
 
   sendInput(seq, moveX, moveY, firing, aim, fireNonce, lagTicks) {
@@ -216,7 +260,7 @@ export class Net {
   // delay plus one-way latency. This is what the server rewinds to when it tests
   // our shots, so what we shoot at is what we saw.
   viewLagTicks() {
-    return Math.round((INTERP_DELAY_MS + this.rtt / 2) / (DT * 1000));
+    return Math.round((this._interpMs + this.rtt / 2) / (DT * 1000));
   }
 
   close() {
