@@ -497,7 +497,7 @@ async function checkAdaptiveInterp() {
 // P picks every rune; W (P's teammate) supplies friendly-fire damage for the
 // heal check; V (the enemy) shoots the shield and eats the power shot.
 async function checkPowers() {
-  const { POWER, RUNE_SPOTS, POWERSHOT_TOWER_DAMAGE, SPEED_MULT, TANK_MAX_SPEED } = await import('../client/shared/protocol.js');
+  const { POWER, RUNE_SPOTS, POWERSHOT_TOWER_DAMAGE, SPEED_MULT, POWER_SHOTS } = await import('../client/shared/protocol.js');
   const P = new Bot('picker');
   const V = new Bot('victim');
   const W = new Bot('wingman');
@@ -605,15 +605,18 @@ async function checkPowers() {
   while (P.me().power !== POWER.POWERSHOT && guard++ < 200) await P.drive(12, 0, 0);
   check(P.me().power === POWER.POWERSHOT, `rune 3 grants POWER SHOT (power ${P.me().power})`);
 
-  // charge 1: one shot, one kill, against a FULL-health tank
+  // charge 1: one shot, one kill, against a FULL-health tank.
+  // EXACTLY one input carries firing=true — the server's leaky-bucket cooldown
+  // lets a longer burst fire twice after an idle, which would silently spend
+  // both charges here and leave nothing for the tower.
   const vHp = V.me().hp;
   const aimV = Math.atan2(V.me().y - P.me().y, V.me().x - P.me().x);
-  await P.drive(24, 0, 0, true, aimV);
-  await sleep(500);
+  await P.drive(1, 0, 0, true, aimV);
+  await sleep(700);
   check(vHp === MAX_HP && !V.me().alive, `a power shot one-shots a full-health tank (was ${vHp}hp)`);
   check(P.ev('death').some((e) => e.victim === V.id && e.killer === P.id), 'and credits the kill');
 
-  // charges 2 and 3: up the left lane into the RED tower. V is dead and its
+  // the remaining charge: up the left lane into the RED tower. V is dead and its
   // team-1 respawns are all well clear of this firing line.
   // ONE pull per assertion: a long firing burst spans several cooldowns, and the
   // moment the charges run out the next pull is an ordinary 34-damage shell —
@@ -626,7 +629,7 @@ async function checkPowers() {
   // carries its own tower/power flags, which is exact.
   const bxBeforeTower = P.ev('bx').length;
   const towerBefore = P.snap.towerHp[1];
-  await P.drive(70, 0, 0, true, aimT);
+  await P.drive(1, 0, 0, true, aimT);              // one pull = one charge
   await sleep(1200);
   const towerHits = P.ev('bx').slice(bxBeforeTower).filter((e) => e.tower === 1);
   const powerHits = towerHits.filter((e) => e.power).length;
@@ -636,7 +639,7 @@ async function checkPowers() {
   check(dealt === powerHits * POWERSHOT_TOWER_DAMAGE + normalHits * BULLET_DAMAGE,
     `each power shell takes ${POWERSHOT_TOWER_DAMAGE} off the tower `
     + `(${powerHits} power + ${normalHits} normal = ${dealt})`);
-  check(P.me().power === POWER.NONE, 'the third charge spends the power');
+  check(P.me().power === POWER.NONE, `the last of ${POWER_SHOTS} charges spends the power`);
 
   P.close(); V.close(); W.close();
 }

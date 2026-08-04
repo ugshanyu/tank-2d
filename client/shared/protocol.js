@@ -94,7 +94,10 @@ export const RUNE_CYCLE = [
 ];
 export const POWER_DURATION = 7;        // s a claimed power lasts
 export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)
-export const POWER_SHOTS = 3;           // powershot grants this many shells...
+export const POWER_SHOTS = 2;           // powershot grants this many shells...
+                                        // two, not three: each one is a
+                                        // guaranteed kill or a quarter of a
+                                        // tower, so a third made it a spree
 export const POWERSHOT_TOWER_DAMAGE = 140; // ...each one-shots a tank, and hits
                                         // the tower for 4x a normal shell
 export const DOUBLE_SPREAD = 0.07;      // rad between the two barrels of a double
