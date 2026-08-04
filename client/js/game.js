@@ -728,7 +728,8 @@ export class Game {
       }
       case 'rune':
         // somebody claimed the rune: flash + sound for everyone, countdown for me
-        this.effects.push({ kind: 'powerup', x: msg.x, y: msg.y, born: performance.now(), dur: 600 });
+        // (kind2 carries the power so the burst matches the rune's colour)
+        this.effects.push({ kind: 'powerup', kind2: msg.kind, x: msg.x, y: msg.y, born: performance.now(), dur: 600 });
         this.events.push({ kind: 'powerup', key: msg.taker, x: msg.x });
         if (msg.taker === this.myId) this.myPowerUntil = performance.now() + POWER_DURATION * 1000;
         break;

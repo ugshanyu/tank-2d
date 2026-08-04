@@ -60,9 +60,10 @@ export const RELOAD_TIME = 1.25;        // s to refill an empty magazine
 if (MAG_SIZE > 7) throw new Error('MAG_SIZE must fit in 3 snapshot bits (<= 7)');
 export const MUZZLE_OFFSET = 34;        // bullet spawn distance from tank center
 
-export const RESPAWN_DELAY = 8;         // s. Long enough that dying COSTS you —
-                                        // 2.5s was short enough to trade lives
-                                        // for tower damage and just keep coming.
+export const RESPAWN_DELAY = 5;         // s. Long enough that dying COSTS you
+                                        // (2.5s let you trade lives for tower
+                                        // damage and just keep coming), short
+                                        // enough that 8s of staring did not.
 export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 
 // ---- Power runes ----
@@ -76,17 +77,34 @@ export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 // authoritative — the client only renders what the snapshot/events say.
 export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3 };
 export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT'];
-export const RUNE_PERIOD = 10;          // s from spawn/claim to the next rune
+// One colour per power, used by the rune, its pickup burst and the HUD timer, so
+// the thing you picked up and the thing you are holding are the same colour.
+// Each matches the power's in-world signature: amber shells, the cyan shield
+// bubble, the magenta power shell.
+export const POWER_COLORS = ['', '#ffb454', '#5ad2ff', '#ff6bd6'];
+export const RUNE_PERIOD = 10;          // s between waves
+// Which power each wave carries, cycled in order. POWER SHOT is a one-shot kill
+// and 4x tower damage, so it appears ONCE per five waves (~every 50 s) while the
+// other two share the rest — rare enough to be an event, not the rhythm. A cycle
+// rather than a roll: both teams can see what is coming and plan for it, and a
+// bad streak of randomness can never hand one side three power shots in a row.
+export const RUNE_CYCLE = [
+  POWER.DOUBLE, POWER.SHIELD, POWER.POWERSHOT, POWER.DOUBLE, POWER.SHIELD,
+];
 export const POWER_DURATION = 7;        // s a claimed power lasts
 export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)
 export const POWER_SHOTS = 3;           // powershot grants this many shells...
 export const POWERSHOT_TOWER_DAMAGE = 140; // ...each one-shots a tank, and hits
                                         // the tower for 4x a normal shell
 export const DOUBLE_SPREAD = 0.07;      // rad between the two barrels of a double
-// The exact arena centre sits INSIDE the center obstacle, so the rune alternates
-// between the two open pockets just above and below it — mirrored, so neither
-// team owns the spawn.
-export const RUNE_SPOTS = [{ x: 360, y: 512 }, { x: 360, y: 768 }];
+// THE TWO GATES. On the halfway line (y = ARENA_H/2) the obstacles are the left
+// nub (x 40-140), the centre box (x 300-420) and the right nub (x 580-680) — so
+// the gaps flanking the centre box are at x≈220 and x≈500. Both runes sit dead
+// on the halfway line, equidistant from both towers: neither team is closer to
+// either gate, and taking one means crossing into the middle.
+// Clearance check: a 26px tank at x=220 has 54px either side; the 22px rune
+// never touches the nub (198 > 140) or the box (242 < 300).
+export const RUNE_SPOTS = [{ x: 220, y: ARENA_H / 2 }, { x: 500, y: ARENA_H / 2 }];
 
 // ---- Teams ----
 export const TEAM_COUNT = 2;            // 0 = BLUE (bottom half), 1 = RED (top half)

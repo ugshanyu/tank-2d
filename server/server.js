@@ -15,7 +15,7 @@ import {
   MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
   MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
-  POWER, RUNE_PERIOD, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
+  POWER, RUNE_PERIOD, RUNE_CYCLE, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
   POWER_SHOTS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
@@ -49,7 +49,7 @@ class Room {
     // power runes: one per mirrored spot, spawned as a same-kind PAIR each wave
     this.runes = [0, 0];      // kind at RUNE_SPOTS[i], 0 = empty
     this.runeAt = 0;          // tick the next wave appears (0 = schedule on first step)
-    this.runeCycle = 0;       // deterministic kind rotation: double -> shield -> power
+    this.runeCycle = 0;       // index into RUNE_CYCLE (deterministic rotation)
   }
   runeByte() { return (this.runes[0] & 0x0f) | ((this.runes[1] & 0x0f) << 4); }
   freeId() {
@@ -303,7 +303,7 @@ function stepRune(room) {
   // unclaimed rune is overwritten by the next wave. Fixed cadence: the next
   // wave lands RUNE_PERIOD after this one regardless of pickups.
   if (tick >= room.runeAt) {
-    const kind = (room.runeCycle % 3) + 1;
+    const kind = RUNE_CYCLE[room.runeCycle % RUNE_CYCLE.length];
     room.runeCycle += 1;
     room.runes[0] = kind;
     room.runes[1] = kind;

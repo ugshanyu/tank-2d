@@ -410,40 +410,43 @@ async function checkNoRevives(port) {
   });
 
   const ka = setInterval(() => { if (ws.readyState === 1) ws.send(encodePing(Date.now())); }, 2000);
-  // A match RESTART revives everyone at once, legitimately faster than a respawn
-  // — and with bots grabbing power runes, matches can end inside the probe
-  // window. Flips near a match boundary are not lies; exclude them.
-  let matchEdgeAt = -1e9;
+
+  // THE CONTRACT, asserted directly: the client may never draw a tank dead that
+  // the server has not declared dead. Watching for dead->alive flips instead was
+  // measuring respawn bookkeeping (id recycling, match resets, the spawn event
+  // landing an interp-delay before the rendered revival) and flaked on all three.
+  // A server `death` event is the ONLY licence to draw a corpse.
+  const deathEventAt = new Map();   // id -> when the server declared it dead
+  const seenAlive = new Set();      // ids we have actually drawn alive at least once
+  const drawnDead = new Set();      // ids currently drawn dead
+  let invented = 0, deathsSeen = 0;
   const realOnEvent = game.onEvent.bind(game);
   game.onEvent = (m) => {
-    if (m.t === 'matchover' || m.t === 'matchstart') { matchEdgeAt = Date.now(); }
+    if (m.t === 'death') deathEventAt.set(m.victim, Date.now());
+    if (m.t === 'leave') { deathEventAt.delete(m.id); seenAlive.delete(m.id); drawnDead.delete(m.id); }
     return realOnEvent(m);
   };
-  const deadSince = new Map();   // id -> when we first drew it dead
-  let revives = 0, deathsSeen = 0, fastest = Infinity;
+
   const runMs = 15000;           // bots fight (3-shell kills): deaths WILL happen
   const t0 = Date.now();
   while (Date.now() - t0 < runMs) {
     if (game.me) game.tick({ moveX: 0, moveY: 0, firing: false }, 0);
     const renderMs = game.frame(DT);
     for (const st of game.remoteStates(renderMs, DT)) {
-      const was = deadSince.get(st.id);
-      if (!st.alive && was === undefined) { deadSince.set(st.id, Date.now()); deathsSeen++; }
-      if (st.alive && was !== undefined) {
-        const deadFor = Date.now() - was;
-        deadSince.delete(st.id);
-        if (Math.abs(Date.now() - matchEdgeAt) < 3000) continue;  // match reset, not a lie
-        fastest = Math.min(fastest, deadFor);
-        // a REAL respawn takes RESPAWN_DELAY; anything much faster is the
-        // client walking back a kill it invented. 60% leaves room for clock skew.
-        if (deadFor < RESPAWN_DELAY * 1000 * 0.6) revives++;
-      }
+      if (st.alive) { seenAlive.add(st.id); drawnDead.delete(st.id); continue; }
+      if (!seenAlive.has(st.id) || drawnDead.has(st.id)) continue;
+      drawnDead.add(st.id);
+      deathsSeen++;
+      // the death event precedes the RENDERED death by about the interp delay,
+      // so a legitimate corpse always has a recent server declaration behind it
+      const at = deathEventAt.get(st.id);
+      if (at === undefined || Date.now() - at > 4000) invented++;
     }
     await sleep(1000 * DT);
   }
   check(deathsSeen > 0, `the probe watched real deaths happen (${deathsSeen} observed)`);
-  check(revives === 0,
-    `zero revives: no tank was ever drawn dead then alive early (fastest respawn ${Number.isFinite(fastest) ? Math.round(fastest) : '—'}ms)`);
+  check(invented === 0,
+    `every corpse was declared by the SERVER first — zero invented deaths (${deathsSeen} deaths, ${invented} invented)`);
 
   clearInterval(ka);
   ws.close();
@@ -516,10 +519,11 @@ async function checkPowers() {
   check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
 
   // ---- wave 1: DOUBLE SHOT at BOTH gates ----
-  // park P just outside the pickup circle so the pair is observable in a
-  // snapshot before P claims one
-  await goTo(P, 170, 512);
-  await goTo(P, RUNE_SPOTS[0].x, 578);
+  // The gates sit ON the halfway line, in the gaps flanking the centre box. Park
+  // P in the left gate's lane but outside the pickup circle, so the pair is
+  // observable in a snapshot before P claims one.
+  await goTo(P, RUNE_SPOTS[0].x, 900);
+  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y + 110);
   let guard = 0;
   while ((!P.snap.runes || P.snap.runes.length === 0) && guard++ < 80) await P.drive(12, 0, 0);
   check(P.snap.runes.length === 2
@@ -551,43 +555,60 @@ async function checkPowers() {
   check(P.me().power === POWER.NONE, 'a power lapses after 7 seconds');
 
   // ---- wave 2: SHIELD (P camps the same gate — both fill every wave) ----
-  // pre-position the enemy on a clear line to the gate so it can shoot the bubble
-  await goTo(V, 550, 512);
+  // Enemy straight up the same lane from the gate: a clear line of fire with no
+  // obstacle between (the crossbar spans x 260-460, this lane is x=220).
+  await goTo(V, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y - 240);
   guard = 0;
   while (P.me().power !== POWER.SHIELD && guard++ < 80) await P.drive(12, 0, 0);
   check(P.me().power === POWER.SHIELD, `rune 2 grants SHIELD (power ${P.me().power})`);
   const hpShielded = P.me().hp;
   const bxBefore = V.ev('bx').length;
-  await V.drive(80, 0, 0, true, Math.PI);          // two shots into the bubble
+  // aim at where P ACTUALLY is rather than a hard-coded angle
+  const aimP = Math.atan2(P.me().y - V.me().y, P.me().x - V.me().x);
+  await V.drive(80, 0, 0, true, aimP);             // two shots into the bubble
   await sleep(400);
   const blockedBx = V.ev('bx').slice(bxBefore).filter((e) => e.hit === P.id && e.blocked);
   check(blockedBx.length >= 1, `the shield blocks shots (${blockedBx.length} blocked bx)`);
   check(P.me().hp === hpShielded && P.me().alive, 'and the shielded tank takes zero damage');
 
   // ---- wave 3: POWER SHOT ----
-  await goTo(V, 550, 600);                          // clear diagonal from the lane
+  // V is still parked straight up the gate's lane from the shield phase, so P
+  // has an immediate clear shot without driving anywhere.
   guard = 0;
   while (P.me().power !== POWER.POWERSHOT && guard++ < 80) await P.drive(12, 0, 0);
   check(P.me().power === POWER.POWERSHOT, `rune 3 grants POWER SHOT (power ${P.me().power})`);
 
-  // Tower first — the drives eat into the 7s window, so spend the charges in the
-  // order that leaves the least slack: two into the RED tower up the left lane...
-  const towerBefore = P.snap.towerHp[1];
-  await goTo(P, 210, 480);
-  const aimT = Math.atan2(135 - P.me().y, 330 - P.me().x);
-  await P.drive(50, 0, 0, true, aimT);             // exactly two trigger pulls
-  await sleep(1000);                                // flight time to the tower
-  const towerAfter = P.snap.towerHp[1];
-  check(towerBefore - towerAfter === 2 * POWERSHOT_TOWER_DAMAGE,
-    `power shots hit the tower for ${POWERSHOT_TOWER_DAMAGE} each (${towerBefore} -> ${towerAfter})`);
-
-  // ...and the last charge one-shots the full-health enemy
+  // charge 1: one shot, one kill, against a FULL-health tank
   const vHp = V.me().hp;
   const aimV = Math.atan2(V.me().y - P.me().y, V.me().x - P.me().x);
-  await P.drive(20, 0, 0, true, aimV);
-  await sleep(600);
+  await P.drive(24, 0, 0, true, aimV);
+  await sleep(500);
   check(vHp === MAX_HP && !V.me().alive, `a power shot one-shots a full-health tank (was ${vHp}hp)`);
   check(P.ev('death').some((e) => e.victim === V.id && e.killer === P.id), 'and credits the kill');
+
+  // charges 2 and 3: up the left lane into the RED tower. V is dead and its
+  // team-1 respawns are all well clear of this firing line.
+  // ONE pull per assertion: a long firing burst spans several cooldowns, and the
+  // moment the charges run out the next pull is an ordinary 34-damage shell —
+  // which silently turns "2 x 140" into "140 + 34 + 34".
+  await goTo(P, RUNE_SPOTS[0].x, 480);
+  const aimT = Math.atan2(135 - P.me().y, 330 - P.me().x);
+  // Count what actually LANDED rather than how many times the trigger was
+  // pulled: the server's leaky-bucket cooldown deliberately allows a burst of 2
+  // after an idle, so "one pull" is not a thing a test can assume. Every bx
+  // carries its own tower/power flags, which is exact.
+  const bxBeforeTower = P.ev('bx').length;
+  const towerBefore = P.snap.towerHp[1];
+  await P.drive(70, 0, 0, true, aimT);
+  await sleep(1200);
+  const towerHits = P.ev('bx').slice(bxBeforeTower).filter((e) => e.tower === 1);
+  const powerHits = towerHits.filter((e) => e.power).length;
+  const normalHits = towerHits.length - powerHits;
+  const dealt = towerBefore - P.snap.towerHp[1];
+  check(powerHits >= 1, `power shells reached the tower (${powerHits})`);
+  check(dealt === powerHits * POWERSHOT_TOWER_DAMAGE + normalHits * BULLET_DAMAGE,
+    `each power shell takes ${POWERSHOT_TOWER_DAMAGE} off the tower `
+    + `(${powerHits} power + ${normalHits} normal = ${dealt})`);
   check(P.me().power === POWER.NONE, 'the third charge spends the power');
 
   P.close(); V.close(); W.close();

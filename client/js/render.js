@@ -5,7 +5,7 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, BULLET_RADIUS, MAX_HP,
-  TOWER_RADIUS, TOWER_HP, MAG_SIZE, BULLET_DAMAGE,
+  TOWER_RADIUS, TOWER_HP, MAG_SIZE, BULLET_DAMAGE, POWER_COLORS,
 } from '../shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../shared/sim.js';
 
@@ -376,23 +376,25 @@ export class Renderer {
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
-    // Power runes — pulsing pickup circles with the kind's glyph, one per gate.
-    // Rendered from the snapshot byte, so exactly as present as the server says.
+    // Power runes — one per gate, each in its power's own colour with its own
+    // drawn icon. Rendered from the snapshot byte, so exactly as present as the
+    // server says. Icons are PATHS, not glyphs: a font fallback that swapped ×2
+    // for a tofu box would make two powers indistinguishable.
     for (const r of state.runes || []) {
       const pulse = 1 + 0.08 * Math.sin(now / 220);
+      const col = POWER_COLORS[r.kind] || '#ffd76e';
       ctx.save();
       ctx.translate(r.x, r.y);
-      ctx.globalAlpha = 0.25;
-      ctx.fillStyle = '#ffd76e';
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = col;
       ctx.beginPath(); ctx.arc(0, 0, 30 * pulse, 0, Math.PI * 2); ctx.fill();
       ctx.globalAlpha = 1;
-      ctx.strokeStyle = '#ffd76e';
+      ctx.fillStyle = 'rgba(6,10,18,0.55)';
+      ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = col;
       ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = '#fff3cf';
-      ctx.font = 'bold 19px system-ui, sans-serif';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(['', '×2', '◈', '★'][r.kind] || '?', 0, 1);
+      this._powerIcon(r.kind, col);
       ctx.restore();
     }
 
@@ -442,7 +444,7 @@ export class Renderer {
         const bx = state.mePos.x - w / 2, by = state.mePos.y + TANK_RADIUS + 19;
         ctx.fillStyle = 'rgba(255,255,255,0.15)';
         ctx.fillRect(bx, by, w, 3.5);
-        ctx.fillStyle = 'rgba(255,215,110,0.95)';
+        ctx.fillStyle = POWER_COLORS[state.myPower] || '#ffd76e';
         ctx.fillRect(bx, by, w * state.myPowerFrac, 3.5);
         ctx.restore();
       }
@@ -736,12 +738,14 @@ export class Renderer {
       ctx.lineWidth = 4 * (1 - f) + 1;
       ctx.beginPath(); ctx.arc(e.x, e.y, 16 + 18 * ease(f), 0, Math.PI * 2); ctx.stroke();
     } else if (e.kind === 'powerup') {
-      // rune claimed: golden burst
+      // rune claimed: a burst in that power's own colour
+      const pc = POWER_COLORS[e.kind2] || '#ffd76e';
       ctx.globalAlpha = 1 - f;
-      ctx.strokeStyle = '#ffd76e';
+      ctx.strokeStyle = pc;
       ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 55 * ease(f), 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = `rgba(255,215,110,${0.35 * (1 - f)})`;
+      ctx.globalAlpha = 0.35 * (1 - f);
+      ctx.fillStyle = pc;
       ctx.beginPath(); ctx.arc(e.x, e.y, 20 + 40 * ease(f), 0, Math.PI * 2); ctx.fill();
     } else if (e.kind === 'confirm') {
       // Server-confirmed hitmarker: four ticks + a floating damage number. The
@@ -765,6 +769,45 @@ export class Renderer {
       ctx.fillText(typeof e.dmg === 'string' ? e.dmg : `-${e.dmg ?? ''}`, 0, -22 - 16 * ease(f));
     }
     ctx.restore();
+  }
+
+  // Power icons, drawn at the current origin. Three silhouettes that stay
+  // readable at ~12 screen px and can never be confused for each other:
+  //   DOUBLE     two stacked shells with trails
+  //   SHIELD     a shield outline
+  //   POWERSHOT  a lightning bolt
+  _powerIcon(kind, col) {
+    const { ctx } = this;
+    ctx.fillStyle = col;
+    ctx.strokeStyle = col;
+    if (kind === 1) {
+      ctx.lineWidth = 2.4;
+      ctx.lineCap = 'round';
+      for (const dy of [-5, 5]) {
+        ctx.beginPath(); ctx.moveTo(-9, dy); ctx.lineTo(2, dy); ctx.stroke();
+        ctx.beginPath(); ctx.arc(6, dy, 3.1, 0, Math.PI * 2); ctx.fill();
+      }
+    } else if (kind === 2) {
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(8.5, -6);
+      ctx.lineTo(8.5, 2);
+      ctx.quadraticCurveTo(8.5, 8, 0, 11);
+      ctx.quadraticCurveTo(-8.5, 8, -8.5, 2);
+      ctx.lineTo(-8.5, -6);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(2.5, -11);
+      ctx.lineTo(-7.5, 1.5);
+      ctx.lineTo(-0.5, 1.5);
+      ctx.lineTo(-2.5, 11);
+      ctx.lineTo(7.5, -1.5);
+      ctx.lineTo(0.5, -1.5);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   // The shield bubble — drawn on ANY tank whose snapshot power bit says so.

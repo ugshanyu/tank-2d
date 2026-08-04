@@ -3,8 +3,13 @@
 // denied, and WASD/arrows + mouse on desktop. Uses Pointer Events throughout.
 
 const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
-const JOY_MAX = 78;          // px of drag for full joystick deflection (64 was
-                             // twitchy under a thumb arc on a 375px screen)
+const JOY_MAX = 52;          // px of drag for full joystick deflection. 78 was
+                             // most of a thumb's reach, so "touch and go" felt
+                             // like winding up before anything happened.
+const JOY_MIN = 3;           // px before the stick engages — just enough to not
+                             // read a stationary thumb's jitter as input
+const JOY_FLOOR = 0.4;       // the sim's curve parameter at JOY_MIN: the tank
+                             // leaves at ~26% speed rather than from a standstill
 const TILT_SMOOTH_TAU = 0.045;  // s — ease toward the sensor reading instead of
                                 // consuming it raw; accelerometer noise otherwise
                                 // makes the tank twitch when you hold still
@@ -261,8 +266,22 @@ export class Input {
       this.moveX = clamp(x / TILT_RANGE_DEG, -1, 1);
       this.moveY = clamp(y / TILT_RANGE_DEG, -1, 1);
     } else if (this.joy) {
-      this.moveX = clamp(this.joy.dx / JOY_MAX, -1, 1);
-      this.moveY = clamp(this.joy.dy / JOY_MAX, -1, 1);
+      // INSTANT off the mark. The shared sim drops anything under 0.12 and then
+      // eases in quadratically (s*s*0.6 + s*0.4), so a small drag used to mean
+      // thumb down, stick deflected, tank barely crawling. Map the drag onto the
+      // sim's own curve parameter starting at JOY_FLOOR instead of 0, so the
+      // first millimetre past the jitter threshold is already ~26% speed and it
+      // climbs smoothly from there. (Solving the curve keeps the feel linear-ish
+      // rather than re-introducing a ramp on top of the sim's.)
+      const d = Math.hypot(this.joy.dx, this.joy.dy);
+      if (d <= JOY_MIN) { this.moveX = 0; this.moveY = 0; }
+      else {
+        const f = Math.min(1, (d - JOY_MIN) / (JOY_MAX - JOY_MIN));
+        const s = JOY_FLOOR + (1 - JOY_FLOOR) * f;   // sim curve parameter, 0..1
+        const mag = 0.12 + 0.88 * s;                 // undo the sim's deadzone
+        this.moveX = (this.joy.dx / d) * mag;
+        this.moveY = (this.joy.dy / d) * mag;
+      }
     } else {
       this.moveX = kx;
       this.moveY = ky;
