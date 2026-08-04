@@ -411,11 +411,10 @@ export class Renderer {
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
-    // Power rune — a pulsing pickup circle with the kind's glyph. Rendered from
-    // the snapshot byte, so it is exactly as present as the server says.
-    if (state.rune) {
+    // Power runes — pulsing pickup circles with the kind's glyph, one per gate.
+    // Rendered from the snapshot byte, so exactly as present as the server says.
+    for (const r of state.runes || []) {
       const pulse = 1 + 0.08 * Math.sin(now / 220);
-      const r = state.rune;
       ctx.save();
       ctx.translate(r.x, r.y);
       ctx.globalAlpha = 0.25;
@@ -470,15 +469,16 @@ export class Renderer {
         state.ammo ?? MAG_SIZE, !!state.reloading,
       );
       if (state.myPower === 2) this._shield(state.mePos.x, state.mePos.y, now);
-      // power countdown: a golden arc that empties over the 7 seconds
+      // power countdown: a golden bar draining under the tank — deliberately NOT
+      // a ring; circles around the own tank read as a permanent aura.
       if (state.myPower > 0 && state.myPowerFrac > 0) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(255,215,110,0.9)';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(state.mePos.x, state.mePos.y, TANK_RADIUS + 16,
-          -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * state.myPowerFrac);
-        ctx.stroke();
+        const w = 44;
+        const bx = state.mePos.x - w / 2, by = state.mePos.y + TANK_RADIUS + 19;
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(bx, by, w, 3.5);
+        ctx.fillStyle = 'rgba(255,215,110,0.95)';
+        ctx.fillRect(bx, by, w * state.myPowerFrac, 3.5);
         ctx.restore();
       }
     }
@@ -684,28 +684,19 @@ export class Renderer {
     ctx.restore();
 
     if (isMe) {
-      // Reload arc doubles as the "this is you" marker. The dashed ring it replaced
-      // cost a full dash-flatten every frame on iOS and told the player nothing —
-      // meanwhile 330 ms of cooldown was silently swallowing shots, which is
-      // indistinguishable from lag.
-      ctx.strokeStyle = 'rgba(255,255,255,0.20)';
-      ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(0, 0, R + 8, 0, Math.PI * 2); ctx.stroke();
-      ctx.strokeStyle = isReloading ? 'rgba(255,190,90,0.95)'
-        : reload >= 1 ? 'rgba(255,255,255,0.95)' : 'rgba(139,233,253,0.9)';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(0, 0, R + 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(reload, 0, 1));
-      ctx.stroke();
-
-      // Ammo pips around the ring — you need to know how many rounds are left
-      // without doing arithmetic on an arc.
-      const pipR = R + 15;
+      // No ring around the player's own tank — the encircling reload arc + pips
+      // read as a permanent "aura" and got removed by request. Ammo lives in a
+      // small pip row UNDER the sprite instead; the row doubles as the reload
+      // indicator (pips refill left-to-right in amber while reloading).
+      const pipY = R + 12;
+      const span = (MAG_SIZE - 1) * 9;
       for (let i = 0; i < MAG_SIZE; i++) {
-        const a = -Math.PI / 2 + (i / MAG_SIZE) * Math.PI * 2;
-        ctx.fillStyle = i < ammo ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.18)';
+        const filled = isReloading ? (i / MAG_SIZE) < clamp(reload, 0, 1) : i < ammo;
+        ctx.fillStyle = isReloading
+          ? (filled ? 'rgba(255,190,90,0.95)' : 'rgba(255,255,255,0.18)')
+          : (filled ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.18)');
         ctx.beginPath();
-        ctx.arc(Math.cos(a) * pipR, Math.sin(a) * pipR, 2.6, 0, Math.PI * 2);
+        ctx.arc(-span / 2 + i * 9, pipY, 2.4, 0, Math.PI * 2);
         ctx.fill();
       }
     }

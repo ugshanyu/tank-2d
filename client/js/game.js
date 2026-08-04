@@ -91,7 +91,7 @@ export class Game {
     this.respawnCountdown = 0;
 
     // power rune on the field (authoritative, straight from the snapshot byte)
-    this.rune = null;             // {kind, x, y} | null
+    this.runes = [];              // [{kind, x, y}] — one per occupied spot
     this.myPowerUntil = 0;        // local clock estimate for the HUD countdown ring
 
     // pooled per-frame output (this path runs every frame for every tank)
@@ -401,8 +401,14 @@ export class Game {
   // ---------- snapshots ----------
   onSnapshot(snap) {
     if (!this.myId) return;
+    // Drop stale/duplicate snapshots. TCP never reorders, but the netsim test
+    // relay does (UDP-style, on purpose) — and an out-of-order OLD snapshot
+    // appended after a newer one briefly resurrected dead tanks and rewound
+    // health bars. One monotonicity check closes the whole class.
+    if (this._lastSnapTick !== undefined && snap.tick <= this._lastSnapTick) return;
+    this._lastSnapTick = snap.tick;
     if (snap.towerHp) this.towerHp = snap.towerHp;
-    this.rune = snap.rune ?? null;
+    this.runes = snap.runes ?? [];
     const tMs = snap.tick * DT * 1000;
 
     for (const t of snap.tanks) {
@@ -519,6 +525,7 @@ export class Game {
         this.pending.length = 0;
         this._clearShells();
         this._resetMagazine();
+        this._lastSnapTick = undefined;  // a restarted server's tick starts lower
         break;
       case 'join':
         this.names.set(msg.id, msg.name);

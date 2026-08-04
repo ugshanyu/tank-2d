@@ -64,12 +64,14 @@ export const RESPAWN_DELAY = 2.5;       // seconds
 export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 
 // ---- Power runes ----
-// A rune appears near mid-arena every RUNE_PERIOD seconds; driving over it grants
-// a power for POWER_DURATION seconds and refills health instantly. Kinds CYCLE
-// (double -> shield -> power shot) rather than roll randomly: every match sees
-// every power, both teams can plan around what comes next, and tests are
-// deterministic. Everything here is server-authoritative — the client only
-// renders what the snapshot/events say.
+// Every RUNE_PERIOD seconds a PAIR of runes appears — one at each mid-arena
+// pocket, both the SAME kind, each claimable independently — so both teams get
+// the same opportunity at the same moment and neither owns the spawn. Driving
+// over one grants its power for POWER_DURATION seconds and refills health
+// instantly. Kinds CYCLE per wave (double -> shield -> power shot) rather than
+// roll randomly: every match sees every power, both teams can plan around what
+// comes next, and tests are deterministic. Everything here is server-
+// authoritative — the client only renders what the snapshot/events say.
 export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3 };
 export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT'];
 export const RUNE_PERIOD = 10;          // s from spawn/claim to the next rune
@@ -194,9 +196,10 @@ export function decodePong(v) {
 // ---- SNAPSHOT: s->c ----
 // header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count][u16 towerHp0][u16 towerHp1][u8 rune]
 //         (14 bytes)
-// rune: 0 = none on the field, else (kind 1..3) | (spot index << 4) — position is
-// derived from RUNE_SPOTS, so presence costs one byte and survives mid-match joins
-// (an event alone would be missed by anyone who connected after it fired).
+// rune: low nibble = kind at RUNE_SPOTS[0], high nibble = kind at RUNE_SPOTS[1]
+// (0 = that spot is empty) — positions derive from shared constants, so BOTH
+// runes cost one byte and survive mid-match joins (an event alone would be
+// missed by anyone who connected after it fired).
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
 // flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7), bits5-6 = active power
@@ -240,9 +243,9 @@ export function decodeSnapshot(v /* DataView */) {
   const count = v.getUint8(8);
   const towerHp = [v.getUint16(9, true), v.getUint16(11, true)];
   const runeByte = v.getUint8(13);
-  const rune = runeByte
-    ? { kind: runeByte & 0x0f, ...RUNE_SPOTS[(runeByte >> 4) & 1] }
-    : null;
+  const runes = [];
+  if (runeByte & 0x0f) runes.push({ kind: runeByte & 0x0f, ...RUNE_SPOTS[0] });
+  if (runeByte >> 4) runes.push({ kind: runeByte >> 4, ...RUNE_SPOTS[1] });
   const tanks = [];
   let o = SNAP_HEADER;
   for (let i = 0; i < count; i++) {
@@ -263,5 +266,5 @@ export function decodeSnapshot(v /* DataView */) {
     });
     o += TANK_BYTES;
   }
-  return { tick, lastAckSeq, yourId, tanks, towerHp, rune };
+  return { tick, lastAckSeq, yourId, tanks, towerHp, runes };
 }

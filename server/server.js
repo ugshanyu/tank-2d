@@ -46,13 +46,12 @@ class Room {
     this.winner = -1;         // team that won the last match
     this.resetAt = 0;         // tick at which a finished match restarts
     this.wins = [0, 0];       // matches won, per team, for the life of the room
-    // power rune: none on the field until the first period elapses
-    this.rune = null;         // {kind, spot} while one is on the field
-    this.runeAt = 0;          // tick the next rune appears (0 = schedule on first step)
+    // power runes: one per mirrored spot, spawned as a same-kind PAIR each wave
+    this.runes = [0, 0];      // kind at RUNE_SPOTS[i], 0 = empty
+    this.runeAt = 0;          // tick the next wave appears (0 = schedule on first step)
     this.runeCycle = 0;       // deterministic kind rotation: double -> shield -> power
-    this.runeSpot = 0;        // alternates between the two mirrored spots
   }
-  runeByte() { return this.rune ? (this.rune.kind | (this.rune.spot << 4)) : 0; }
+  runeByte() { return (this.runes[0] & 0x0f) | ((this.runes[1] & 0x0f) << 4); }
   freeId() {
     for (let i = 1; i <= MAX_PLAYERS_PER_ROOM; i++) if (!this.players.has(i)) return i;
     return 0;
@@ -299,29 +298,34 @@ function stepRune(room) {
     }
   }
 
-  if (!room.rune) {
-    if (tick >= room.runeAt) {
-      room.rune = { kind: (room.runeCycle % 3) + 1, spot: room.runeSpot };
-      room.runeCycle += 1;
-      room.runeSpot ^= 1;
-    }
-    return;
+  // Each wave fills BOTH spots with the same kind — one gate per team's side of
+  // the middle, at the same moment, so neither team owns the spawn. A stale
+  // unclaimed rune is overwritten by the next wave. Fixed cadence: the next
+  // wave lands RUNE_PERIOD after this one regardless of pickups.
+  if (tick >= room.runeAt) {
+    const kind = (room.runeCycle % 3) + 1;
+    room.runeCycle += 1;
+    room.runes[0] = kind;
+    room.runes[1] = kind;
+    room.runeAt = tick + Math.round(RUNE_PERIOD * TICK_RATE);
   }
 
-  // pickup: first living tank to touch it — full heal + the power, 7 s
-  const spot = RUNE_SPOTS[room.rune.spot];
-  for (const p of room.players.values()) {
-    const t = p.tank;
-    if (!t.alive) continue;
-    if (Math.hypot(t.x - spot.x, t.y - spot.y) > TANK_RADIUS + RUNE_RADIUS) continue;
-    t.hp = MAX_HP;
-    t.power = room.rune.kind;
-    p.powerUntil = tick + Math.round(POWER_DURATION * TICK_RATE);
-    p.powerShots = room.rune.kind === POWER.POWERSHOT ? POWER_SHOTS : 0;
-    room.broadcastJson({ t: 'rune', taker: p.id, kind: room.rune.kind, x: spot.x, y: spot.y });
-    room.rune = null;
-    room.runeAt = tick + Math.round(RUNE_PERIOD * TICK_RATE);
-    break;
+  // pickup, per spot: first living tank to touch one — full heal + power, 7 s
+  for (let i = 0; i < 2; i++) {
+    if (!room.runes[i]) continue;
+    const spot = RUNE_SPOTS[i];
+    for (const p of room.players.values()) {
+      const t = p.tank;
+      if (!t.alive) continue;
+      if (Math.hypot(t.x - spot.x, t.y - spot.y) > TANK_RADIUS + RUNE_RADIUS) continue;
+      t.hp = MAX_HP;
+      t.power = room.runes[i];
+      p.powerUntil = tick + Math.round(POWER_DURATION * TICK_RATE);
+      p.powerShots = room.runes[i] === POWER.POWERSHOT ? POWER_SHOTS : 0;
+      room.broadcastJson({ t: 'rune', taker: p.id, kind: room.runes[i], x: spot.x, y: spot.y });
+      room.runes[i] = 0;
+      break;
+    }
   }
 }
 
@@ -406,10 +410,9 @@ function startMatch(room) {
   room.bullets.length = 0;
   for (const tw of room.towers) { tw.hp = TOWER_HP; tw.nextFireAt = -10; }
   // fresh rune schedule; the kind cycle restarts so every match opens the same way
-  room.rune = null;
+  room.runes = [0, 0];
   room.runeAt = 0;
   room.runeCycle = 0;
-  room.runeSpot = 0;
   // clear the board first so pickSpawn never treats a stale position as an enemy
   for (const p of room.players.values()) p.tank.alive = false;
   for (const p of room.players.values()) {

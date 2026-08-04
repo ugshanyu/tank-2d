@@ -410,6 +410,15 @@ async function checkNoRevives(port) {
   });
 
   const ka = setInterval(() => { if (ws.readyState === 1) ws.send(encodePing(Date.now())); }, 2000);
+  // A match RESTART revives everyone at once, legitimately faster than a respawn
+  // — and with bots grabbing power runes, matches can end inside the probe
+  // window. Flips near a match boundary are not lies; exclude them.
+  let matchEdgeAt = -1e9;
+  const realOnEvent = game.onEvent.bind(game);
+  game.onEvent = (m) => {
+    if (m.t === 'matchover' || m.t === 'matchstart') { matchEdgeAt = Date.now(); }
+    return realOnEvent(m);
+  };
   const deadSince = new Map();   // id -> when we first drew it dead
   let revives = 0, deathsSeen = 0, fastest = Infinity;
   const runMs = 15000;           // bots fight (3-shell kills): deaths WILL happen
@@ -423,6 +432,7 @@ async function checkNoRevives(port) {
       if (st.alive && was !== undefined) {
         const deadFor = Date.now() - was;
         deadSince.delete(st.id);
+        if (Math.abs(Date.now() - matchEdgeAt) < 3000) continue;  // match reset, not a lie
         fastest = Math.min(fastest, deadFor);
         // a REAL respawn takes RESPAWN_DELAY (2.5s); anything much faster is the
         // client walking back a kill it invented. 60% leaves room for clock skew.
@@ -494,7 +504,7 @@ async function checkPowers() {
   await sleep(300);
 
   // no rune on the field before the first period elapses
-  check(P.snap.rune == null, 'no rune before the first period');
+  check(!P.snap.runes || P.snap.runes.length === 0, 'no rune before the first period');
 
   // W wounds P (friendly fire) so the heal on pickup is observable — exactly ONE
   // shot: drive() paces on wall time, so a long firing burst lands three shells
@@ -505,15 +515,24 @@ async function checkPowers() {
   const wounded = P.me().hp;
   check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
 
-  // ---- rune 1: DOUBLE SHOT ----
-  // park P on the spawn spot; pickup happens the tick after it appears
+  // ---- wave 1: DOUBLE SHOT at BOTH gates ----
+  // park P just outside the pickup circle so the pair is observable in a
+  // snapshot before P claims one
   await goTo(P, 170, 512);
-  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
+  await goTo(P, RUNE_SPOTS[0].x, 578);
   let guard = 0;
+  while ((!P.snap.runes || P.snap.runes.length === 0) && guard++ < 80) await P.drive(12, 0, 0);
+  check(P.snap.runes.length === 2
+        && P.snap.runes[0].kind === POWER.DOUBLE && P.snap.runes[1].kind === POWER.DOUBLE,
+    `a wave fills BOTH gates with the same kind (${JSON.stringify(P.snap.runes?.map((r) => r.kind))})`);
+
+  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
+  guard = 0;
   while (P.me().power !== POWER.DOUBLE && guard++ < 60) await P.drive(12, 0, 0);
   check(P.me().power === POWER.DOUBLE, `rune 1 grants DOUBLE (power ${P.me().power})`);
   check(P.me().hp === MAX_HP, 'pickup refills health instantly');
   check(P.ev('rune').some((e) => e.taker === P.id && e.kind === POWER.DOUBLE), 'rune pickup event broadcast');
+  check(P.snap.runes.length === 1, 'claiming one gate leaves the other rune standing');
 
   // drive() paces on wall time so a "single" burst can span 2 trigger pulls —
   // assert the INVARIANT instead: every pull while doubled is exactly two fire
@@ -531,13 +550,9 @@ async function checkPowers() {
   await sleep(7200);                                // let the power expire
   check(P.me().power === POWER.NONE, 'a power lapses after 7 seconds');
 
-  // ---- rune 2: SHIELD ----
-  // pre-position the enemy so it can shoot the shield the moment it's up
+  // ---- wave 2: SHIELD (P camps the same gate — both fill every wave) ----
+  // pre-position the enemy on a clear line to the gate so it can shoot the bubble
   await goTo(V, 550, 512);
-  await goTo(V, 550, 768);
-  await goTo(P, 200, 512);
-  await goTo(P, 200, 768);
-  await goTo(P, RUNE_SPOTS[1].x, RUNE_SPOTS[1].y);
   guard = 0;
   while (P.me().power !== POWER.SHIELD && guard++ < 80) await P.drive(12, 0, 0);
   check(P.me().power === POWER.SHIELD, `rune 2 grants SHIELD (power ${P.me().power})`);
@@ -549,11 +564,8 @@ async function checkPowers() {
   check(blockedBx.length >= 1, `the shield blocks shots (${blockedBx.length} blocked bx)`);
   check(P.me().hp === hpShielded && P.me().alive, 'and the shielded tank takes zero damage');
 
-  // ---- rune 3: POWER SHOT ----
+  // ---- wave 3: POWER SHOT ----
   await goTo(V, 550, 600);                          // clear diagonal from the lane
-  await goTo(P, 200, 768);
-  await goTo(P, 200, 512);
-  await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
   guard = 0;
   while (P.me().power !== POWER.POWERSHOT && guard++ < 80) await P.drive(12, 0, 0);
   check(P.me().power === POWER.POWERSHOT, `rune 3 grants POWER SHOT (power ${P.me().power})`);
@@ -1065,6 +1077,21 @@ async function botPhase() {
     await sleep(500);
     check(solo.ev('leave').length === leavesBefore + 1, 'a bot gave up its seat for the 2nd human');
     check(solo.snap.tanks.length === 4, `still exactly 4 tanks (${solo.snap.tanks.length})`);
+
+    // ---- EVERY human gets a seat: joins 3 and 4 each kick a bot too ----
+    const third = new Bot('human3', BOT_PORT);
+    await third.connect('botroom');
+    const fourth = new Bot('human4', BOT_PORT);
+    await fourth.connect('botroom');
+    await sleep(400);
+    const roster = fourth.ev('welcome')[0].players;
+    check(third.id > 0 && fourth.id > 0, `humans 3 and 4 both seated (ids ${third.id}, ${fourth.id})`);
+    check(roster.filter((p) => p.bot).length === 0 && roster.length === 4,
+      `a full human lobby has ZERO bots left (${JSON.stringify(roster.map((p) => p.bot ? 'bot' : 'human'))})`);
+    check(solo.snap.tanks.length === 4, 'and never more than 4 tanks');
+    third.close();
+    fourth.close();
+    await sleep(500);
 
     // ---- room drains when the humans leave (bots must not simulate forever) ----
     solo.close();

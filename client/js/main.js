@@ -422,7 +422,7 @@ function startNet(resolveUrl) {
     drawState.myTeam = game.myTeam;
     drawState.towerHp = game.towerHp;
     drawState.towers = game.towerState;
-    drawState.rune = game.rune;
+    drawState.runes = game.runes;
     drawState.myPower = game.meServer ? game.meServer.power : 0;
     drawState.myPowerFrac = drawState.myPower
       ? Math.max(0, Math.min(1, (game.myPowerUntil - performance.now()) / 7000)) : 0;
