@@ -28,7 +28,11 @@ export class Input {
     this.isTouch = (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
       || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
     this.prefersTilt = this.isTouch;
-    this.tiltPreset = 'angled';   // the pose most people actually hold a phone in
+    // Default posture: 'auto' — neutral is sampled from HOWEVER the player is
+    // holding the phone when tilt engages, so their current angle IS level. The
+    // named presets remain as explicit choices in settings and, once chosen,
+    // stick across launches.
+    this.tiltPreset = 'auto';
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
     try {
       const stored = localStorage.getItem('tank.tilt');
@@ -38,7 +42,7 @@ export class Input {
       // without one, applyTiltPreset would fail and we'd fall back to sampling.
       this._customBeta = Number(localStorage.getItem('tank.tiltBeta'));
       this.tiltPreset = (pose === 'custom' && Number.isFinite(this._customBeta)) ? 'custom'
-        : (TILT_PRESETS[pose] !== undefined ? pose : 'angled');
+        : (TILT_PRESETS[pose] !== undefined ? pose : 'auto');
     } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
@@ -83,6 +87,13 @@ export class Input {
       this._beta = e.beta;
       this._gamma = e.gamma;
       if (this._sBeta === null) { this._sBeta = e.beta; this._sGamma = e.gamma; }
+      // pose left the stability window before the auto-level refinement fired:
+      // the provisional neutral stands, the pending refinement is abandoned
+      if (this._autoArmed
+          && (Math.abs(wrapDeg(e.beta - this._beta0)) > 12
+            || Math.abs(wrapDeg(e.gamma - this._gamma0)) > 12)) {
+        this._autoArmed = false;
+      }
       if (this.tiltReady) return;
       // First real reading, whenever it lands.
       this.tiltReady = true;
@@ -90,6 +101,30 @@ export class Input {
       if (this.prefersTilt) this.setMode('tilt');
       if (this.onTiltReady) this.onTiltReady();
     });
+  }
+
+  // 'auto' neutral: the pose the player is holding right now IS level. The first
+  // reading often lands while the thumb is still on the permission dialog and the
+  // phone is mid-wobble, so take a provisional neutral immediately (the tank must
+  // not drive off on its own) and refine from the SMOOTHED pose a moment later.
+  // Deliberately not persisted: every launch re-levels to however you sit today.
+  _autoLevel() {
+    if (this._beta === null) return;
+    this._beta0 = this._sBeta ?? this._beta;
+    this._gamma0 = this._sGamma ?? this._gamma;
+    // Refine once the pose settles — but the moment it leaves the stability
+    // window the refinement is CANCELLED for good (see the listener check):
+    // the player is steering, and re-levelling then would yank the stick from
+    // whatever pose the timer happened to catch mid-motion.
+    this._autoArmed = true;
+    clearTimeout(this._autoTimer);
+    this._autoTimer = setTimeout(() => {
+      if (this._autoArmed && this.tiltPreset === 'auto' && this._sBeta !== null) {
+        this._beta0 = this._sBeta;
+        this._gamma0 = this._sGamma;
+      }
+      this._autoArmed = false;
+    }, 700);
   }
 
   // Must be called from a user gesture (button tap).
@@ -145,9 +180,16 @@ export class Input {
     this.firing = false;
   }
 
-  // One of three postures. Cheaper for the player than "hold still and tap" and
-  // it survives them shifting position, which auto-calibration does not.
+  // 'auto' (the default) levels to the current pose; the named postures are
+  // explicit choices that stick across launches for players who want a fixed
+  // reference that survives shifting position.
   applyTiltPreset(name) {
+    if (name === 'auto') {
+      this.tiltPreset = 'auto';
+      this._autoLevel();
+      try { localStorage.setItem('tank.tiltPose', 'auto'); } catch { /* ignore */ }
+      return true;
+    }
     if (name === 'custom' && Number.isFinite(this._customBeta)) {
       this.tiltPreset = 'custom';
       this._beta0 = this._customBeta;
@@ -155,7 +197,7 @@ export class Input {
       return true;
     }
     const beta = TILT_PRESETS[name];
-    if (beta === undefined) return this.applyTiltPreset('angled');
+    if (beta === undefined) return this.applyTiltPreset('auto');
     this.tiltPreset = name;
     this._beta0 = beta;
     this._gamma0 = 0;
@@ -298,7 +340,10 @@ export class Input {
     // silently re-sampling neutral on a rotation is precisely the auto-calibration
     // that gets reported as "the calibration is royally screwed up".
     const onOrient = () => setTimeout(() => {
+      // pose-derived neutrals must re-sample after a rotation flips the axes;
+      // the absolute presets are orientation-mapped in poll() and need nothing
       if (this.tiltPreset === 'custom') this.calibrate();
+      else if (this.tiltPreset === 'auto') this._autoLevel();
     }, 700);
     if (screen.orientation && screen.orientation.addEventListener) {
       screen.orientation.addEventListener('change', onOrient);

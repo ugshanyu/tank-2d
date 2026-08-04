@@ -798,16 +798,18 @@ async function checkTilt() {
   const settle = async (beta) => {
     for (let i = 0; i < 5; i++) { emit(beta, 0); await sleep(60); input.poll(); }
   };
-  const neutral = input._beta0;
-  await settle(neutral);
+  // The default 'auto' posture refines its neutral from the smoothed pose ~700ms
+  // after tilt engages, so read the LIVE neutral before each assertion instead
+  // of caching it — the refinement is the feature, not drift.
+  await settle(input._beta0);
   const idle = Math.abs(input.moveX) + Math.abs(input.moveY);
-  check(idle < 0.05, `holding the chosen posture does not drive the tank (${idle.toFixed(3)})`);
+  check(idle < 0.05, `holding the current pose does not drive the tank (${idle.toFixed(3)})`);
 
   // ...and tilting past the range drives it at full speed.
-  await settle(neutral + 20);
+  await settle(input._beta0 + 20);
   check(input.moveY > 0.9,
     `tilting past the range drives at full speed (moveY=${input.moveY.toFixed(2)})`);
-  await settle(neutral - 20);
+  await settle(input._beta0 - 20);
   check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
 
   // ---- desktop: WASD/arrows must steer ----
