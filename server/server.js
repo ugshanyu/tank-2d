@@ -29,6 +29,7 @@ const INPUT_QUEUE_CAP = 6;      // jitter buffer cap; beyond this old inputs are
 const INPUTS_PER_TICK = 2;      // catch-up bound (limits burst speed-up)
 const IDLE_TIMEOUT_MS = 15000;  // kick silent connections (clients ping every 2 s)
 const HELLO_TIMEOUT_MS = 5000;
+const LOBBY_MAX_WAIT = 120;     // s a waiting room will sit before starting itself
 const HIST_TICKS = 32;          // position history ring for lag compensation
                                 // (> MAX_LAG_TICKS so a rewind never wraps onto itself)
 
@@ -42,7 +43,11 @@ class Room {
     this.bullets = [];
     this.nextBulletId = 1;
     this.towers = TOWERS.map((t) => ({ team: t.team, x: t.x, y: t.y, hp: TOWER_HP, nextFireAt: -10 }));
-    this.phase = 'playing';   // 'playing' | 'over'
+    // 'lobby'   — an INVITE room waiting for friends. No bots, no simulation.
+    // 'playing' — live. 'over' — result screen.
+    // World/random rooms are born playing (the platform's world rooms are too);
+    // only invite rooms wait, because only they have someone to wait for.
+    this.phase = 'playing';
     this.winner = -1;         // team that won the last match
     this.resetAt = 0;         // tick at which a finished match restarts
     this.wins = [0, 0];       // matches won, per team, for the life of the room
@@ -50,6 +55,30 @@ class Room {
     this.runes = [0, 0];      // kind at RUNE_SPOTS[i], 0 = empty
     this.runeAt = 0;          // tick the next wave appears (0 = schedule on first step)
     this.runeCycle = 0;       // index into RUNE_CYCLE (deterministic rotation)
+    this.isInvite = false;    // set once, by whoever creates the room
+    this.hostId = 0;          // lowest-id human; only they may START
+    this.ready = new Set();   // player ids that tapped ready
+    this.lobbyUntil = 0;      // backstop tick: nobody waits forever on a silent host
+  }
+
+  // Roster for the waiting room. Sent on every change, never per-tick.
+  lobbyState() {
+    return {
+      t: 'lobby', hostId: this.hostId, phase: this.phase,
+      players: [...this.players.values()].filter((p) => !p.isBot).map((p) => ({
+        id: p.id, name: p.name, team: p.tank.team, ready: this.ready.has(p.id),
+      })),
+    };
+  }
+
+  // The host is simply the lowest-numbered human present, so it survives the
+  // host leaving with no election protocol.
+  refreshHost() {
+    let best = 0;
+    for (const p of this.players.values()) if (!p.isBot && (!best || p.id < best)) best = p.id;
+    const changed = best !== this.hostId;
+    this.hostId = best;
+    return changed;
   }
   runeByte() { return (this.runes[0] & 0x0f) | ((this.runes[1] & 0x0f) << 4); }
   freeId() {
@@ -116,6 +145,11 @@ function dropBot(room) {
 }
 
 function ensureBots(room) {
+  // A LOBBY IS NEVER BOT-FILLED. The platform's own direct-mode notes record
+  // this exact failure: "a bot filled the lone waiting player's room, the round
+  // auto-started, and the invited opponent arrived into a live round as a
+  // spectator." Bots arrive at START, not while we are waiting for friends.
+  if (room.phase === 'lobby') return;
   if (!BOTS_ENABLED || room.humans() === 0) {
     for (const p of [...room.players.values()]) if (p.isBot) room.players.delete(p.id);
     return;
@@ -123,11 +157,19 @@ function ensureBots(room) {
   while (room.players.size < MAX_PLAYERS_PER_ROOM && addBot(room)) { /* fill */ }
 }
 
-function getRoom(id) {
+// `invite` only takes effect when the room is CREATED — a later joiner cannot
+// flip a live room back into a lobby, so a wrong or hostile claim can never
+// strand players who are already playing.
+function getRoom(id, invite = false) {
   let room = rooms.get(id);
   if (!room) {
     if (rooms.size >= MAX_ROOMS) return null;
     room = new Room(id);
+    if (invite) {
+      room.isInvite = true;
+      room.phase = 'lobby';
+      room.lobbyUntil = tick + Math.round(LOBBY_MAX_WAIT * TICK_RATE);
+    }
     rooms.set(id, room);
   }
   return room;
@@ -152,6 +194,17 @@ function pickSpawn(room, team) {
 let tick = 0;
 
 function stepRoom(room) {
+  // Waiting room: nothing simulates, but snapshots MUST keep flowing. A direct
+  // server that goes silent while a room idles gets its connections culled by
+  // the proxy edge (Railway included) after ~60s, and the waiting clients then
+  // reconnect-loop forever re-minting access tokens.
+  if (room.phase === 'lobby') {
+    // Start by ourselves when the room fills, or when the backstop expires so a
+    // silent host can never strand the people who did show up.
+    if (room.humans() >= MAX_PLAYERS_PER_ROOM || tick >= room.lobbyUntil) startMatch(room);
+    sendSnapshots(room);
+    return;
+  }
   // Match over: the arena is frozen on the result screen. Snapshots keep
   // flowing so clients still render the final state, then the match restarts.
   if (room.phase === 'over') {
@@ -413,6 +466,7 @@ function endMatch(room, winner) {
 }
 
 function startMatch(room) {
+  const wasLobby = room.phase === 'lobby';
   room.phase = 'playing';
   room.winner = -1;
   room.bullets.length = 0;
@@ -433,6 +487,8 @@ function startMatch(room) {
     p.inputQueue.length = 0;
   }
   room.broadcastJson({ t: 'matchstart', wins: room.wins });
+  // Only NOW do bots arrive: the empty seats of a room that has stopped waiting.
+  if (wasLobby) { room.ready.clear(); ensureBots(room); }
 }
 
 function tryFire(room, p, inp) {
@@ -613,13 +669,28 @@ wss.on('connection', (ws, req) => {
       let msg;
       try { msg = JSON.parse(data.toString().slice(0, 512)); } catch { return; }
       if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return; // JSON.parse('null') etc.
+      // Only the host starts, only from a lobby. Everything else is ignored
+      // rather than answered — a stray frame must never move the room.
+      if (msg.t === 'start' && player && room && room.phase === 'lobby'
+          && player.id === room.hostId) {
+        startMatch(room);
+        return;
+      }
+      if (msg.t === 'ready' && player && room && room.phase === 'lobby') {
+        if (msg.v) room.ready.add(player.id); else room.ready.delete(player.id);
+        room.broadcastJson(room.lobbyState());
+        return;
+      }
       if (msg.t === 'hello' && !player) {
         // Room + identity come from the TOKEN, never the client. The display
         // name is the only client-supplied field (cosmetic) — sanitized, and it
         // falls back to the token's name claim / user id.
         const roomId = auth.room_id;
         const name = String(msg.name || auth.name || 'tank').replace(/[<>&"']/g, '').trim().slice(0, 16) || 'tank';
-        const r = getRoom(roomId);
+        // The client tells us how it was launched. A false claim is harmless by
+        // construction: it can only change the type of YOUR OWN token-bound room
+        // at creation time, never let you reach anybody else's.
+        const r = getRoom(roomId, msg.invite === true);
         if (!r) { ws.send(JSON.stringify({ t: 'error', reason: 'server full' })); ws.close(1013); return; }
         // A user reconnecting (new socket, same token identity) must not occupy
         // two slots — retire any prior tank they hold in this room first.
@@ -653,13 +724,16 @@ wss.on('connection', (ws, req) => {
           hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
         };
         room.players.set(id, player);
+        room.refreshHost();   // BEFORE the welcome, or the first player — who IS
+                              // the host — is told hostId 0 and never sees START
         ws.send(JSON.stringify({
           t: 'welcome', id, team, room: roomId, tick, tickRate: TICK_RATE,
-          wins: room.wins, phase: room.phase,
+          wins: room.wins, phase: room.phase, hostId: room.hostId,
           players: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, team: p.tank.team, bot: !!p.isBot })),
         }));
         room.broadcastJson({ t: 'join', id, name, team });
-        ensureBots(room); // top the match back up to 2v2
+        ensureBots(room);            // no-op while a lobby waits
+        if (room.phase === 'lobby') room.broadcastJson(room.lobbyState());
       }
       return;
     }
@@ -695,9 +769,12 @@ wss.on('connection', (ws, req) => {
       room.bullets = room.bullets.filter((b) => b.owner !== player.id);
       for (const b of orphaned) room.broadcastJson({ t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y), hit: 0 });
       room.broadcastJson({ t: 'leave', id: player.id });
+      room.ready.delete(player.id);
+      room.refreshHost();            // lowest remaining human inherits START
       // refill for whoever is left — and if that was the last human, ensureBots
       // clears the bots so the abandoned room can be reclaimed below
       ensureBots(room);
+      if (room.phase === 'lobby') room.broadcastJson(room.lobbyState());
       if (room.players.size === 0) { rooms.delete(room.id); }
     }
   });

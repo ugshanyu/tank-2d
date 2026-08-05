@@ -22,9 +22,10 @@ export class Net {
   // `resolveUrl` is an async () => wsUrl-with-token, called on every (re)connect
   // so a fresh access token is minted each time — platform tokens are short
   // lived (~30 min) and a long match can reconnect after that.
-  constructor(resolveUrl, { name, onSnapshot, onEvent, onStatus }) {
+  constructor(resolveUrl, { name, invite, onSnapshot, onEvent, onStatus }) {
     this.resolveUrl = resolveUrl;
     this.name = name;
+    this.invite = !!invite;   // an invite room opens a lobby; a world room plays
     this.onSnapshot = onSnapshot;
     this.onEvent = onEvent;       // (jsonMsg) => void
     this.onStatus = onStatus;     // ('connecting'|'connected'|'reconnecting') => void
@@ -107,7 +108,7 @@ export class Net {
       this._interpTarget = undefined;
       this._interpSince = 0;
       this._rttRing.length = 0;
-      ws.send(JSON.stringify({ t: 'hello', name: this.name }));
+      ws.send(JSON.stringify({ t: 'hello', name: this.name, invite: this.invite }));
       clearInterval(this._pingTimer);
       this._pingTimer = setInterval(() => {
         if (ws.readyState === 1) ws.send(encodePing(performance.now()));
@@ -248,6 +249,11 @@ export class Net {
   // is told about — MUST read this one accessor, or aim breaks systematically.
   interpDelayMs() {
     return this._interpMs;
+  }
+
+  // lobby control frames (JSON, off the hot path)
+  sendJson(obj) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj));
   }
 
   sendInput(seq, moveX, moveY, firing, aim, fireNonce, lagTicks) {

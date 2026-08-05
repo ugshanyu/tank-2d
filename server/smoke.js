@@ -8,7 +8,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 import {
   MSG, DT, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
-  TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS,
+  TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS, MAX_PLAYERS_PER_ROOM,
   FIRE_COOLDOWN, MAG_SIZE, RELOAD_TIME, RESPAWN_DELAY,
 } from '../client/shared/protocol.js';
 
@@ -56,7 +56,7 @@ class Bot {
     this.events = [];        // all JSON events
     this.ws = null;
   }
-  connect(room = 'smoke') {
+  connect(room = 'smoke', invite = false) {
     return new Promise((resolve, reject) => {
       // Direct-mode auth: every socket presents a token. In the test the server
       // runs with DEV_ALLOW_UNSIGNED=1, which accepts `dev:<userId>:<roomId>`.
@@ -68,7 +68,7 @@ class Bot {
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const to = setTimeout(() => reject(new Error('connect timeout')), 4000);
-      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name })));
+      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name, invite })));
       ws.on('message', (data, isBinary) => {
         if (!isBinary) {
           const msg = JSON.parse(data.toString());
@@ -90,6 +90,7 @@ class Bot {
       if (this.ws.readyState === 1) this.ws.send(encodePing(Date.now()));
     }, 2000);
   }
+  sendJson(o) { this.ws.send(JSON.stringify(o)); }
   me() { return this.snap?.tanks.find((t) => t.id === this.id); }
   tank(id) { return this.snap?.tanks.find((t) => t.id === id); }
   ev(type) { return this.events.filter((e) => e.t === type); }
@@ -427,9 +428,13 @@ async function checkNoRevives(port) {
     return realOnEvent(m);
   };
 
-  const runMs = 15000;           // bots fight (3-shell kills): deaths WILL happen
+  // Run until the probe has actually WITNESSED a death, not for a fixed window:
+  // whether bots kill each other inside any given 15s is a coin flip (3-shell
+  // kills, 1s cooldown, 5s respawns, shields), and "0 deaths observed" made the
+  // whole check vacuous — it failed intermittently for that reason alone.
+  const minMs = 12000, maxMs = 40000;
   const t0 = Date.now();
-  while (Date.now() - t0 < runMs) {
+  while (Date.now() - t0 < maxMs && (Date.now() - t0 < minMs || deathsSeen === 0)) {
     if (game.me) game.tick({ moveX: 0, moveY: 0, firing: false }, 0);
     const renderMs = game.frame(DT);
     for (const st of game.remoteStates(renderMs, DT)) {
@@ -652,6 +657,65 @@ async function checkPowers() {
   check(P.me().power === POWER.NONE, `the last of ${POWER_SHOTS} charges spends the power`);
 
   P.close(); V.close(); W.close();
+}
+
+// Invite rooms wait; random rooms play. The bug this guards against is written
+// down in the platform's own direct-mode notes: a bot filled a lone waiting
+// player's room, the round auto-started, and the invited friend arrived into a
+// live match as a spectator.
+async function checkLobby() {
+  // ---- an INVITE room waits, with no bots ----
+  const host = new Bot('hostie', BOT_PORT);
+  await host.connect('inviteroom', true);
+  await sleep(600);
+  const w = host.ev('welcome')[0];
+  check(w.phase === 'lobby', `an invite room opens in a LOBBY (phase ${w.phase})`);
+  check(w.hostId === host.id, `the opener is the host (hostId ${w.hostId} vs id ${host.id})`);
+  check(host.snap.tanks.length === 1,
+    `and is NOT bot-filled while it waits (${host.snap.tanks.length} tank)`);
+  check(host.snap !== null, 'snapshots keep flowing while idle, so the proxy cannot cull the socket');
+
+  // ---- the invited friend arrives, still no bots, both in the roster ----
+  const friend = new Bot('friendo', BOT_PORT);
+  await friend.connect('inviteroom', true);
+  await sleep(600);
+  const lob = host.ev('lobby').pop();
+  check(lob && lob.players.length === 2, `both players show in the waiting room (${lob?.players.length})`);
+  check(host.snap.tanks.length === 2, `still no bots before START (${host.snap.tanks.length} tanks)`);
+  check(friend.ev('welcome')[0].hostId === host.id, 'the friend agrees who the host is');
+
+  // ---- a non-host cannot start ----
+  friend.sendJson({ t: 'start' });
+  await sleep(400);
+  check(host.ev('matchstart').length === 0, 'a NON-host tapping start does nothing');
+
+  // ---- the host starts: bots fill the empty seats, only now ----
+  host.sendJson({ t: 'start' });
+  await sleep(700);
+  check(host.ev('matchstart').length === 1, 'the host starts the match');
+  check(host.snap.tanks.length === MAX_PLAYERS_PER_ROOM,
+    `and the empty seats fill with bots at that moment (${host.snap.tanks.length})`);
+  host.close(); friend.close();
+  await sleep(400);
+
+  // ---- a RANDOM room does not wait: straight into a match with bots ----
+  const rando = new Bot('rando', BOT_PORT);
+  await rando.connect('worldroom', false);
+  await sleep(700);
+  check(rando.ev('welcome')[0].phase === 'playing',
+    `a random room is born playing, never waiting (${rando.ev('welcome')[0].phase})`);
+  check(rando.snap.tanks.length === MAX_PLAYERS_PER_ROOM,
+    `and is bot-filled immediately (${rando.snap.tanks.length} tanks)`);
+
+  // ---- a second random joins that same room and evicts a bot ----
+  const rando2 = new Bot('rando2', BOT_PORT);
+  await rando2.connect('worldroom', false);
+  await sleep(600);
+  const roster = rando2.ev('welcome')[0].players;
+  check(roster.filter((p) => !p.bot).length === 2 && roster.length === MAX_PLAYERS_PER_ROOM,
+    `a joining human takes a bot's seat, not a 5th (${roster.filter((p) => !p.bot).length} humans of ${roster.length})`);
+  rando.close(); rando2.close();
+  await sleep(400);
 }
 
 // Progression is local-only, so its correctness is entirely in this module:
@@ -1160,6 +1224,8 @@ async function botPhase() {
     const second = new Bot('human2', BOT_PORT);
     await second.connect('botroom');
     await sleep(500);
+    await checkLobby();
+
     check(solo.ev('leave').length === leavesBefore + 1, 'a bot gave up its seat for the 2nd human');
     check(solo.snap.tanks.length === 4, `still exactly 4 tanks (${solo.snap.tanks.length})`);
 

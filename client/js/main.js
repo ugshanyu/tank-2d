@@ -26,7 +26,7 @@ for (const id of ['status', 'respawn', 'respawnIn', 'toast', 'calibrate',
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
-                  'introAim', 'motion', 'motionGo', 'motionSkip', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
+                  'introAim', 'motion', 'motionGo', 'motionSkip', 'lobby', 'lobbyTitle', 'lobbyList', 'lobbyStart', 'lobbyInvite', 'lobbyHint', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
                   'matchCard', 'stKills', 'stDeaths', 'stTower', 'xpLevel', 'xpGain', 'xpFill']) {
   EL[id] = document.getElementById(id);
 }
@@ -49,7 +49,7 @@ const renderer = new Renderer(canvas);
 const input = new Input(canvas);
 
 // resolved once the SDK (or its absence) settles
-const me = { userId: null, userName: '', embedded: false, roomId: null };
+const me = { userId: null, userName: '', embedded: false, roomId: null, invite: false };
 let net = null;
 let game = null;
 let netStarted = false;
@@ -271,6 +271,12 @@ function wireUi() {
   EL.shake2.addEventListener('click', () => { setShakeScale(1); syncSheet(); });
   EL.optCal.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   EL.optHelp.addEventListener('click', () => { openSheet(false); showIntro(); });
+  EL.lobbyStart.addEventListener('click', () => { if (net) net.sendJson({ t: 'start' }); });
+  EL.lobbyInvite.addEventListener('click', async () => {
+    // The platform's own friend/group picker — we never draw one.
+    try { await window.Usion?.game?.invite?.({ maxPlayers: 4 }); }
+    catch { toast('Invites are available inside the app', 2600); }
+  });
   EL.motionGo.addEventListener('click', askMotion);
   EL.motionSkip.addEventListener('click', () => {
     EL.motion.classList.remove('on');
@@ -312,15 +318,57 @@ function maybeShowIntro() {
 }
 
 // ------------------------------------------------------------- mode selection --
-function connectAndPlay() {
-  if (me.embedded && me.roomId) {
-    startNet(() => platformUrl(me.roomId));           // real multiplayer match
-  } else if (me.embedded && !me.roomId) {
-    startSoloPractice();                              // solo Explore launch
-    toast('Practice mode — tap Share above to battle friends', 3400);
-  } else {
-    startNet(() => Promise.resolve(devUrl()));         // standalone / local dev
+// Was this opened from a chat game-invite, or solo? Trust the launch MODE the
+// host declares — never infer from roomId, because a solo launch may still be
+// handed an auto-created room for SDK plumbing.
+function launchedFromInvite() {
+  try {
+    const U = window.Usion;
+    const lp = (U && typeof U.getLaunchParams === 'function') ? (U.getLaunchParams() || {}) : {};
+    if (lp.mode === 'multiplayer') return true;
+    if (lp.mode === 'single') return false;
+    if (U && U.game && typeof U.game.isMultiplayer === 'function') return U.game.isMultiplayer();
+    const rid = String(me.roomId || '');
+    return !!rid && !/^standalone[_-]/i.test(rid);
+  } catch { return false; }
+}
+
+// A RANDOM launch asks the platform for a world: the one you are already in,
+// else a backfill into a world with space, else a fresh one. That is exactly
+// "join whoever is around, and start a new room once four are in" — decided
+// atomically by the platform, so seats can never oversell and we never have to
+// weaken the token→room binding to pool strangers ourselves.
+async function findWorldRoom() {
+  const U = window.Usion;
+  if (!U || !U.game || typeof U.game.joinWorld !== 'function') return null;
+  try {
+    const { roomId } = await U.game.joinWorld({ serviceId: SERVICE_ID });
+    return roomId || null;
+  } catch (e) {
+    // MATCH_TIMEOUT, or the service is not tagged `world` yet — fall back to a
+    // private match with bots rather than stranding the player on an overlay.
+    console.warn('[match] no world available, falling back to bots:', e && e.message);
+    return null;
   }
+}
+
+async function connectAndPlay() {
+  me.invite = launchedFromInvite();
+
+  if (me.embedded && me.invite && me.roomId) {
+    startNet(() => platformUrl(me.roomId));            // friends only — opens a lobby
+    return;
+  }
+  if (me.embedded) {
+    // random / solo launch: try to land in a shared world first
+    const world = await findWorldRoom();
+    if (world) { me.roomId = world; startNet(() => platformUrl(world)); return; }
+    if (me.roomId) { startNet(() => platformUrl(me.roomId)); return; }
+    startSoloPractice();                               // nothing to join yet
+    toast('Practice mode — tap Share above to battle friends', 3400);
+    return;
+  }
+  startNet(() => Promise.resolve(devUrl()));           // standalone / local dev
 }
 
 // Fetch a fresh direct-mode access token from the platform and return the WS URL
@@ -346,6 +394,7 @@ function devUrl() {
 function onRoomAssigned(roomId) {
   if (!roomId || netStarted) return;
   me.roomId = roomId;
+  me.invite = true;   // promotion only ever happens via an invite/Share
   stopSoloPractice();
   toast('Match starting…', 1600);
   startNet(() => platformUrl(roomId));
@@ -360,6 +409,7 @@ function startNet(resolveUrl) {
   game = new Game(null); // net assigned below (Net calls back immediately)
   net = new Net(resolveUrl, {
     name: me.userName || 'tank',
+    invite: me.invite,
     onSnapshot: (s) => game.onSnapshot(s),
     onEvent: (m) => {
       game.onEvent(m);
@@ -370,6 +420,9 @@ function startNet(resolveUrl) {
           && (game.teams.get(m.victim) ?? 0) !== game.myTeam) toast('Kill! +1', 1200);
       if (m.t === 'matchstart') toast('New match — go!', 1600);
       if (m.t === 'rune' && m.taker === game.myId) toast(`${POWER_NAMES[m.kind]}!`, 1800);
+      if (m.t === 'welcome') { lobbyHostId = m.hostId || 0; showLobby(m.phase === 'lobby'); }
+      if (m.t === 'lobby') renderLobby(m);
+      if (m.t === 'matchstart') showLobby(false);
       if (m.t === 'error') toast(m.reason, 4000);
     },
     onStatus: (s, reason) => {
@@ -607,6 +660,36 @@ function updateHud() {
       + (s > 0 ? `respawning in ${s.toFixed(1)}s` : 'respawning…');
     if (EL.respawnIn.__last !== txt) { EL.respawnIn.__last = txt; EL.respawnIn.textContent = txt; }
   }
+}
+
+// ------------------------------------------------------------------- lobby --
+// The waiting room for an INVITE match. It never creates or switches rooms and
+// draws no share sheet of its own — the "+ Invite friends" button opens the
+// PLATFORM's picker (Usion.game.invite), which owns invites.
+let lobbyHostId = 0;
+
+function showLobby(on) {
+  EL.lobby.classList.toggle('on', on);
+  if (!on) return;
+  EL.lobbyStart.disabled = !game || game.myId !== lobbyHostId;
+  EL.lobbyHint.textContent = (game && game.myId === lobbyHostId)
+    ? 'Start when your friends are in. Empty seats fill with bots.'
+    : 'Waiting for the host to start…';
+}
+
+function renderLobby(m) {
+  lobbyHostId = m.hostId || 0;
+  const rows = (m.players || []).map((p) => {
+    const you = game && p.id === game.myId;
+    const host = p.id === m.hostId;
+    return `<div class="row"><b style="color:${teamColor(p.team)}">${esc(p.name)}</b>`
+      + `${you ? ' <span class="tag">YOU</span>' : ''}`
+      + `<span class="tag">${host ? 'HOST' : (p.ready ? 'READY' : '')}</span></div>`;
+  }).join('');
+  if (EL.lobbyList.__last !== rows) { EL.lobbyList.innerHTML = rows; EL.lobbyList.__last = rows; }
+  EL.lobbyTitle.textContent = (m.players || []).length > 1
+    ? `READY UP (${m.players.length}/4)` : 'WAITING FOR FRIENDS';
+  showLobby(m.phase === 'lobby');
 }
 
 // ------------------------------------------------------------- solo practice --

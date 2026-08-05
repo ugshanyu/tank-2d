@@ -150,6 +150,28 @@
     background: linear-gradient(180deg, #35c3ef, #1f8fd6); color: #06131f;
     font-size: 17px; font-weight: 800; letter-spacing: 3px; cursor: pointer; }
 
+  /* Waiting room. Shown ONLY for invite rooms — a random launch drops straight
+     into a live match, so nobody ever sits here alone. The platform owns the
+     invite picker itself; the button below just opens it. */
+  #lobby { position: fixed; inset: 0; z-index: 9; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px; text-align: center;
+    padding: 30px; background: rgba(6,10,18,.92); backdrop-filter: blur(3px); }
+  #lobby.on { display: flex; }
+  #lobby h2 { font-size: 20px; letter-spacing: 3px; color: #8be9fd; }
+  #lobbyList { display: flex; flex-direction: column; gap: 8px; min-width: 220px; }
+  #lobbyList .row { display: flex; align-items: center; gap: 10px; font-size: 15px;
+    background: rgba(255,255,255,.06); border-radius: 10px; padding: 9px 14px; }
+  #lobbyList .row b { font-weight: 700; }
+  #lobbyList .row .tag { margin-left: auto; font-size: 11px; letter-spacing: 1px; color: #8b9dc0; }
+  #lobbyBtns { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  #lobby .go { min-height: 52px; padding: 0 46px; border-radius: 13px; border: none;
+    background: linear-gradient(180deg, #35c3ef, #1f8fd6); color: #06131f;
+    font-size: 17px; font-weight: 800; letter-spacing: 3px; cursor: pointer; }
+  #lobby .go[disabled] { opacity: .45; }
+  #lobby .alt { background: none; border: 1px solid #33405c; color: #cfe3ff;
+    font-size: 14px; border-radius: 11px; padding: 11px 20px; cursor: pointer; }
+  #lobbyHint { font-size: 12px; color: #8b9dc0; max-width: 260px; line-height: 1.5; }
+
   /* Motion-permission gate. iOS 13+ only hands out DeviceOrientation from inside
      a user gesture, so the ask cannot fire on load — this puts a deliberate one
      in front of the player the moment the game opens, instead of waiting for
@@ -254,6 +276,16 @@
     <div class="step"><b>3</b><span>Destroy the enemy tower to win. It shoots back.</span></div>
   </div>
   <button class="go" id="introGo">PLAY</button>
+</div>
+
+<div id="lobby">
+  <h2 id="lobbyTitle">WAITING FOR FRIENDS</h2>
+  <div id="lobbyList"></div>
+  <div id="lobbyBtns">
+    <button class="go" id="lobbyStart">START</button>
+    <button class="alt" id="lobbyInvite">+ Invite friends</button>
+  </div>
+  <p id="lobbyHint">The host starts the match. Empty seats fill with bots.</p>
 </div>
 
 <div id="motion">
