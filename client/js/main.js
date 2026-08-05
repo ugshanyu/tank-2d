@@ -26,7 +26,7 @@ for (const id of ['status', 'respawn', 'respawnIn', 'toast', 'calibrate',
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
                   'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
-                  'introAim', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
+                  'introAim', 'motion', 'motionGo', 'motionSkip', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
                   'matchCard', 'stKills', 'stDeaths', 'stTower', 'xpLevel', 'xpGain', 'xpFill']) {
   EL[id] = document.getElementById(id);
 }
@@ -98,6 +98,7 @@ function onReady() {
   };
   armFirstGesture();
   wireUi();
+  maybeAskMotion();
   EL.calibrate.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   connectAndPlay();
   maybeShowIntro();
@@ -153,6 +154,37 @@ function armFirstGesture() {
   };
   window.addEventListener('pointerdown', fire, true);
   window.addEventListener('click', fire, true);
+}
+
+// ASK ON OPEN. iOS 13+ refuses DeviceOrientation to any requestPermission() that
+// is not inside a user gesture, so a page-load prompt is impossible — but waiting
+// for the player to happen to touch the playfield meant tilt engaged whenever,
+// and looked like the game had defaulted to the joystick. This puts one
+// deliberate ask in front of them the moment the game opens.
+//
+// Shown ONLY when it would do something: a touch device that prefers tilt, where
+// the iOS gate genuinely exists and tilt has not already engaged by itself. The
+// 600 ms grace is what keeps it off Android and every WebView without the gate —
+// those attach at startup and are usually already steering by then.
+function maybeAskMotion() {
+  if (!input.isTouch || !input.prefersTilt) return;
+  setTimeout(() => {
+    if (input.tiltReady || !input.needsTiltPrompt()) return;
+    // The first-run intro already puts a PLAY button in the way, and tapping it
+    // is itself the gesture — don't stack two overlays.
+    if (EL.intro.classList.contains('on')) return;
+    EL.motion.classList.add('on');
+  }, 600);
+}
+
+async function askMotion() {
+  EL.motion.classList.remove('on');
+  input.suppressNextPointer = false;      // this tap WAS the prompt, not a shot
+  const verdict = await input.requestTilt();
+  input.clearTouches();
+  if (verdict === 'granted' || input.tiltReady) toast('Tilt to drive', 2000);
+  else if (verdict === 'denied') toast('Motion blocked — joystick on the left. Retry in ⚙', 3400);
+  syncSheet();
 }
 
 // wake locks release when the page hides — take it back on return
@@ -239,6 +271,12 @@ function wireUi() {
   EL.shake2.addEventListener('click', () => { setShakeScale(1); syncSheet(); });
   EL.optCal.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   EL.optHelp.addEventListener('click', () => { openSheet(false); showIntro(); });
+  EL.motionGo.addEventListener('click', askMotion);
+  EL.motionSkip.addEventListener('click', () => {
+    EL.motion.classList.remove('on');
+    input.setMode('stick');               // an explicit choice, and it sticks
+    syncSheet();
+  });
   EL.introGo.addEventListener('click', () => {
     EL.intro.classList.remove('on');
     input.clearTouches();

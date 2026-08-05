@@ -150,6 +150,24 @@
     background: linear-gradient(180deg, #35c3ef, #1f8fd6); color: #06131f;
     font-size: 17px; font-weight: 800; letter-spacing: 3px; cursor: pointer; }
 
+  /* Motion-permission gate. iOS 13+ only hands out DeviceOrientation from inside
+     a user gesture, so the ask cannot fire on load — this puts a deliberate one
+     in front of the player the moment the game opens, instead of waiting for
+     them to happen to touch the playfield. Shown ONLY where that gate exists
+     and tilt has not already engaged. */
+  #motion { position: fixed; inset: 0; z-index: 9; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; text-align: center;
+    padding: 30px; background: rgba(6,10,18,.9); backdrop-filter: blur(3px);
+    opacity: 0; visibility: hidden; transition: opacity .2s ease-out, visibility 0s .2s; }
+  #motion.on { opacity: 1; visibility: visible; transition-delay: 0s; }
+  #motion h2 { font-size: 22px; letter-spacing: 4px; color: #8be9fd; }
+  #motion p { font-size: 14px; color: #9fb4d0; max-width: 280px; line-height: 1.5; }
+  #motion .go { min-height: 52px; padding: 0 40px; border-radius: 13px; border: none;
+    background: linear-gradient(180deg, #35c3ef, #1f8fd6); color: #06131f;
+    font-size: 16px; font-weight: 800; letter-spacing: 2px; cursor: pointer; }
+  #motion .alt { background: none; border: none; color: #8b9dc0; font-size: 13px;
+    text-decoration: underline; cursor: pointer; padding: 8px; }
+
   /* connection loss must be legible as frozen, not mistaken for lag */
   #offline { position: fixed; inset: 0; z-index: 7; display: flex; align-items: center;
     justify-content: center; flex-direction: column; gap: 10px; pointer-events: none;
@@ -236,6 +254,13 @@
     <div class="step"><b>3</b><span>Destroy the enemy tower to win. It shoots back.</span></div>
   </div>
   <button class="go" id="introGo">PLAY</button>
+</div>
+
+<div id="motion">
+  <h2>TILT TO DRIVE</h2>
+  <p>Allow motion access and steer by tilting your phone.</p>
+  <button class="go" id="motionGo">ENABLE TILT</button>
+  <button class="alt" id="motionSkip">Use the joystick instead</button>
 </div>
 
 <div id="hurt"></div>
