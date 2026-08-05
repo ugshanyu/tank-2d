@@ -16,7 +16,7 @@ import {
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
   MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
   POWER, RUNE_PERIOD, RUNE_CYCLE, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
-  POWER_SHOTS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
+  POWER_SHOTS, SHIELD_BLOCKS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
@@ -90,7 +90,7 @@ function addBot(room) {
     isBot: true, profile,
     tank: makeTank(id, s.x, s.y, team),
     inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
-    nextFireAt: -10, respawnAt: 0, reloadAt: 0, powerUntil: 0, powerShots: 0,
+    nextFireAt: -10, respawnAt: 0, reloadAt: 0, powerUntil: 0, powerShots: 0, shieldBlocks: 0,
     hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
     ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1 },
   };
@@ -236,7 +236,13 @@ function stepRoom(room) {
     // SHIELD: the shell detonates on the shielded tank but deals nothing. The
     // bx says so (blocked) so the shooter's client can draw a deflection
     // instead of a hit, and no hurt/confirm feedback lies about damage.
+    // SHIELD spends a charge per shot it eats and pops when they run out, so it
+    // is a finite resource under fire rather than 7s of guaranteed immunity.
     const blocked = hit && hit.tank.power === POWER.SHIELD;
+    if (blocked && --hit.shieldBlocks <= 0) {
+      hit.tank.power = POWER.NONE;
+      hit.shieldBlocks = 0;
+    }
     room.broadcastJson({
       t: 'bx', bid: b.id, x: Math.round(b.x), y: Math.round(b.y),
       hit: hit ? hit.id : 0, tower: towerHit,
@@ -255,7 +261,7 @@ function stepRoom(room) {
       const t = p.tank;
       t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.ammo = MAG_SIZE;
       t.power = POWER.NONE;
-      p.respawnAt = 0; p.reloadAt = 0; p.powerUntil = 0; p.powerShots = 0;
+      p.respawnAt = 0; p.reloadAt = 0; p.powerUntil = 0; p.powerShots = 0; p.shieldBlocks = 0;
       resetHistory(p, s.x, s.y);
       p.inputQueue.length = 0; // stale pre-death inputs must not move the fresh tank
       room.broadcastJson({ t: 'spawn', id: p.id, x: s.x, y: s.y });
@@ -295,6 +301,7 @@ function stepRune(room) {
     if (p.tank.power && tick >= p.powerUntil) {
       p.tank.power = POWER.NONE;
       p.powerShots = 0;
+      p.shieldBlocks = 0;
     }
   }
 
@@ -322,6 +329,7 @@ function stepRune(room) {
       t.power = room.runes[i];
       p.powerUntil = tick + Math.round(POWER_DURATION * TICK_RATE);
       p.powerShots = room.runes[i] === POWER.POWERSHOT ? POWER_SHOTS : 0;
+      p.shieldBlocks = room.runes[i] === POWER.SHIELD ? SHIELD_BLOCKS : 0;
       room.broadcastJson({ t: 'rune', taker: p.id, kind: room.runes[i], x: spot.x, y: spot.y });
       room.runes[i] = 0;
       break;
@@ -420,7 +428,7 @@ function startMatch(room) {
     const t = p.tank;
     t.x = s.x; t.y = s.y; t.vx = 0; t.vy = 0; t.hp = MAX_HP; t.alive = true; t.score = 0; t.ammo = MAG_SIZE;
     t.power = POWER.NONE;
-    p.respawnAt = 0; p.nextFireAt = -10; p.reloadAt = 0; p.powerUntil = 0; p.powerShots = 0;
+    p.respawnAt = 0; p.nextFireAt = -10; p.reloadAt = 0; p.powerUntil = 0; p.powerShots = 0; p.shieldBlocks = 0;
     resetHistory(p, s.x, s.y);
     p.inputQueue.length = 0;
   }
@@ -491,6 +499,7 @@ function applyDamage(room, victim, killerId, power = false) {
   t.alive = false;
   t.power = POWER.NONE;                   // no power survives the grave
   victim.powerShots = 0;
+  victim.shieldBlocks = 0;
   victim.respawnAt = tick + Math.round(RESPAWN_DELAY * TICK_RATE);
   const killer = room.players.get(killerId); // undefined for tower kills — no score
   // friendly fire is on, but a teamkill must not be worth a point
@@ -640,7 +649,7 @@ wss.on('connection', (ws, req) => {
           id, userId: auth.sub, name, ws,
           tank: makeTank(id, s.x, s.y, team),
           inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
-          nextFireAt: -10, respawnAt: 0, reloadAt: 0, powerUntil: 0, powerShots: 0,
+          nextFireAt: -10, respawnAt: 0, reloadAt: 0, powerUntil: 0, powerShots: 0, shieldBlocks: 0,
           hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
         };
         room.players.set(id, player);

@@ -94,6 +94,12 @@ export const RUNE_CYCLE = [
 ];
 export const POWER_DURATION = 7;        // s a claimed power lasts
 export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)
+export const SHIELD_BLOCKS = 4;         // shots the bubble absorbs before it pops.
+                                        // The shield ends on whichever runs out
+                                        // first — these or the 7s clock — so it
+                                        // is a finite resource under fire rather
+                                        // than seven guaranteed seconds of
+                                        // immunity while being shot at.
 export const POWER_SHOTS = 2;           // powershot grants this many shells...
                                         // two, not three: each one is a
                                         // guaranteed kill or a quarter of a

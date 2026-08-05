@@ -497,7 +497,7 @@ async function checkAdaptiveInterp() {
 // P picks every rune; W (P's teammate) supplies friendly-fire damage for the
 // heal check; V (the enemy) shoots the shield and eats the power shot.
 async function checkPowers() {
-  const { POWER, RUNE_SPOTS, POWERSHOT_TOWER_DAMAGE, SPEED_MULT, POWER_SHOTS } = await import('../client/shared/protocol.js');
+  const { POWER, RUNE_SPOTS, POWERSHOT_TOWER_DAMAGE, SPEED_MULT, POWER_SHOTS, SHIELD_BLOCKS } = await import('../client/shared/protocol.js');
   const P = new Bot('picker');
   const V = new Bot('victim');
   const W = new Bot('wingman');
@@ -565,11 +565,21 @@ async function checkPowers() {
   const bxBefore = V.ev('bx').length;
   // aim at where P ACTUALLY is rather than a hard-coded angle
   const aimP = Math.atan2(P.me().y - V.me().y, P.me().x - V.me().x);
-  await V.drive(80, 0, 0, true, aimP);             // two shots into the bubble
+  // Pour shots in until the bubble pops, bounded so a failure cannot hang the
+  // run. Stopping the moment the power clears is what keeps the follow-on shots
+  // from killing P and wrecking the later waves.
+  const shieldT0 = Date.now();
+  while (Date.now() - shieldT0 < 5000 && P.me().power === POWER.SHIELD && P.me().alive) {
+    await V.drive(6, 0, 0, true, aimP);
+  }
   await sleep(400);
-  const blockedBx = V.ev('bx').slice(bxBefore).filter((e) => e.hit === P.id && e.blocked);
-  check(blockedBx.length >= 1, `the shield blocks shots (${blockedBx.length} blocked bx)`);
-  check(P.me().hp === hpShielded && P.me().alive, 'and the shielded tank takes zero damage');
+  const shieldBx = V.ev('bx').slice(bxBefore).filter((e) => e.hit === P.id);
+  const blockedBx = shieldBx.filter((e) => e.blocked);
+  check(blockedBx.length === SHIELD_BLOCKS,
+    `the shield absorbs exactly ${SHIELD_BLOCKS} shots (${blockedBx.length} blocked)`);
+  check(P.me().power === POWER.NONE, 'and pops once its charges are spent, before the timer');
+  check(P.me().hp === hpShielded && P.me().alive,
+    `every absorbed shot dealt zero damage (hp ${P.me().hp})`);
 
   // ---- wave 3: OVERDRIVE ----
   // measure a clean straight-line run at base speed FIRST, as the control
