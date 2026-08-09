@@ -109,10 +109,14 @@ class Room {
 function addBot(room) {
   const id = room.freeId();
   if (!id) return false;
-  const used = new Set();
-  for (const p of room.players.values()) if (p.isBot) used.add(p.profile.key);
-  const profile = BOT_PROFILES.find((b) => !used.has(b.key)) || BOT_PROFILES[0];
   const team = room.pickTeam();
+  // Roles are picked PER TEAM, not per room. Room-wide picking meant a solo
+  // player's first bot (the sieger) landed on the enemy side and their own
+  // teammate got whatever was left — one team pushed the objective and the other
+  // never did. Each side now starts from 'rush', so both towers take pressure.
+  const used = new Set();
+  for (const p of room.players.values()) if (p.isBot && p.tank.team === team) used.add(p.profile.key);
+  const profile = BOT_PROFILES.find((b) => !used.has(b.key)) || BOT_PROFILES[0];
   const s = pickSpawn(room, team);
   const bot = {
     id, userId: `bot:${room.id}:${id}`, name: profile.name, ws: null,

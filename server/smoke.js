@@ -1201,7 +1201,18 @@ async function botPhase() {
     const botJoins = solo.ev('join').filter((e) => e.bot);
     check(botJoins.length === 3, `3 bots joined (${botJoins.length})`);
     const names = botJoins.map((e) => e.name);
-    check(new Set(names).size === 3, `3 DIFFERENT bots (${names.join(', ')})`);
+    // Roles are distinct WITHIN a team, not across the room: each side starts
+    // from the sieger, so both towers come under attack. Two Blitzes on opposite
+    // teams is the correct outcome, not a duplicate.
+    const perTeam = new Map();
+    for (const e of botJoins) {
+      if (!perTeam.has(e.team)) perTeam.set(e.team, []);
+      perTeam.get(e.team).push(e.name);
+    }
+    const roleClash = [...perTeam.values()].some((ns) => new Set(ns).size !== ns.length);
+    check(!roleClash, `no duplicate roles inside a team (${names.join(', ')})`);
+    const everySideAttacks = [...perTeam.values()].every((ns) => ns.includes('Blitz'));
+    check(everySideAttacks, `every bot side has a tower attacker (${names.join(', ')})`);
 
     const myTeam = solo.ev('welcome')[0].team;
     const mine = tanks.filter((t) => t.team === myTeam).length;

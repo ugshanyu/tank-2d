@@ -14,9 +14,9 @@ import {
 } from '../client/shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../client/shared/sim.js';
 
-// The three archetypes. A solo player gets all three, so the match always has
-// one of each: something pushing the objective, something hunting them, and
-// something sitting on the tower they need to kill.
+// The three archetypes, listed in the order they are handed out. Roles are
+// assigned PER TEAM (see addBot), so every side with a bot gets a sieger first:
+// each tower is under attack, and the extra bots add a hunter, then a guard.
 export const BOT_PROFILES = [
   {
     key: 'rush', name: 'Blitz',
@@ -36,6 +36,8 @@ export const BOT_PROFILES = [
 ];
 
 const GUARD_LEASH = 330;       // how far Bulwark will stray from its tower
+const SELF_DEFENCE_RANGE = 260; // a sieging bot only breaks off for tanks this close
+const HUNT_CHASE_RANGE = 900;  // beyond this, Stalker pushes the objective instead
 const STUCK_SPEED = 18;        // px/s below which we consider the tank wedged
 const STUCK_TICKS = 22;
 const EVADE_TICKS = 40;
@@ -266,8 +268,12 @@ export function botInput(room, bot, tick) {
     && towerDist < 900
     && losClear(me.x, me.y, enemyTower.x, enemyTower.y, enemyTowerIdx);
 
-  // Blitz prioritises the objective; the other two prioritise whoever is shooting at them.
-  const towerFirst = prof.key === 'rush' && canHitTower && (!canHitTank || towerDist < near.dist);
+  // Blitz prioritises the objective. It only breaks off to deal with a tank that
+  // is genuinely on top of it — the old rule (any visible tank nearer than the
+  // tower wins) meant a single defender orbiting its base cancelled the siege
+  // entirely, which is why the objective barely took damage.
+  const towerFirst = prof.key === 'rush' && canHitTower
+    && (!canHitTank || near.dist > SELF_DEFENCE_RANGE);
 
   if (towerFirst) {
     aim = Math.atan2(enemyTower.y - me.y, enemyTower.x - me.x) + (Math.random() - 0.5) * prof.aimError;
@@ -309,8 +315,12 @@ export function botInput(room, bot, tick) {
       goal = { x: ownTower.x + Math.cos(a) * 165, y: ownTower.y + Math.sin(a) * 165 };
     }
   } else if (prof.key === 'hunt') {
-    goal = near ? { x: near.player.tank.x, y: near.player.tank.y }
-                : { x: enemyTower.x, y: enemyTower.y };
+    // Chase, but not across the whole arena: an enemy sitting in its own corner
+    // used to drag Stalker away for the entire match, so the tower never saw a
+    // second attacker. Out of chase range it sieges instead.
+    const chase = near && near.dist < HUNT_CHASE_RANGE;
+    goal = chase ? { x: near.player.tank.x, y: near.player.tank.y }
+                 : { x: enemyTower.x, y: enemyTower.y };
   } else {
     // rush: the tower, unless something is right on top of us
     goal = (near && near.dist < 170) ? { x: near.player.tank.x, y: near.player.tank.y }
@@ -326,7 +336,11 @@ export function botInput(room, bot, tick) {
 
   // Back off once we're at our preferred range, and strafe so we're not a
   // stationary target while trading shots.
-  const standoffTarget = towerFirst ? Math.min(prof.standoff, TOWER_RANGE - 40) : prof.standoff;
+  // Sieging, hold station just OUTSIDE the tower's own range. Shells reach ~2100px,
+  // so nothing is lost by standing off, and the bot stops trading its life to the
+  // tower every few seconds — which is what kept it walking back from spawn
+  // instead of shooting the objective.
+  const standoffTarget = towerFirst ? TOWER_RANGE + 45 : prof.standoff;
   const engaged = firing && goalDist < standoffTarget;
   if (engaged) {
     const away = Math.atan2(me.y - goal.y, me.x - goal.x);
@@ -358,7 +372,11 @@ export function botInput(room, bot, tick) {
 
   // Badly hurt: fall back toward our own tower instead of feeding a kill. Still
   // shoots on the way out, so a retreat is a fighting withdrawal, not a freebie.
-  if (me.hp <= MAX_HP * 0.34 && ai.evadeUntil <= tick) {
+  // Only a live tank is worth retreating FROM: a bot plinking the tower from
+  // outside its range is in no danger, and walking home from there just meant it
+  // spent the next ten seconds not attacking anything.
+  const threatened = near && near.dist < prof.engageRange;
+  if (me.hp <= MAX_HP * 0.34 && threatened && ai.evadeUntil <= tick) {
     const back = steer(me, ownTower.x, ownTower.y, 1);
     if (back.x || back.y) { mx = back.x; my = back.y; }
   }
