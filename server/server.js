@@ -508,7 +508,17 @@ function tryFire(room, p, inp) {
   }
   p.tank.ammo -= 1;
   if (p.tank.ammo === 0) p.reloadAt = now + RELOAD_TIME;
-  p.nextFireAt = Math.max(p.nextFireAt, now - FIRE_COOLDOWN) + FIRE_COOLDOWN;
+  // The burst-of-2 allowance above exists to forgive NETWORK jitter, and a bot
+  // has no network: it synthesises its input inside the tick loop, holds the
+  // trigger down continuously, and so banked a full shot of credit during every
+  // pause (blocked LOS, no target, the reaction delay) and spent it as two
+  // shells ONE TICK apart — 68 damage in 16ms, which is what "the bot hits with
+  // a double shot" is. A human physically cannot do that: their client gates on
+  // a strict `now + FIRE_COOLDOWN` (client/js/game.js `_spawnPredicted`) before
+  // it will even send `firing`. Bots get that same strict clock, so the weapon
+  // has exactly one fire rate for everyone.
+  p.nextFireAt = p.isBot ? now + FIRE_COOLDOWN
+                         : Math.max(p.nextFireAt, now - FIRE_COOLDOWN) + FIRE_COOLDOWN;
   // The client reports its view lag at SEND time; the ticks this input then sat
   // in the jitter buffer are additional lag it could not know about (up to 6
   // ticks ≈ 20px at tank speed). -1 because arrival lands mid-interval — without
