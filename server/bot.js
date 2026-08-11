@@ -17,24 +17,31 @@ import { OBSTACLES, TOWERS } from '../client/shared/sim.js';
 // The three archetypes, listed in the order they are handed out. Roles are
 // assigned PER TEAM (see addBot), so every side with a bot gets a sieger first:
 // each tower is under attack, and the extra bots add a hunter, then a guard.
+// `reaction` is the seconds a bot hesitates before opening fire on a target it
+// has just noticed (see the reaction gate in botInput). Stalker — the accurate
+// duelist and the bot players actually complain about — pays the longest.
 export const BOT_PROFILES = [
   {
     key: 'rush', name: 'Blitz',
     role: 'Drives at the enemy tower and sieges it, trading lives for damage.',
-    aimError: 0.045, engageRange: 520, standoff: 300, strafe: 0.5, speed: 1,
+    aimError: 0.045, engageRange: 520, standoff: 300, strafe: 0.5, speed: 1, reaction: 0.9,
   },
   {
     key: 'hunt', name: 'Stalker',
     role: 'Hunts the nearest enemy tank and duels it at mid range.',
-    aimError: 0.028, engageRange: 640, standoff: 240, strafe: 0.95, speed: 1,
+    aimError: 0.028, engageRange: 640, standoff: 240, strafe: 0.95, speed: 1, reaction: 1.1,
   },
   {
     key: 'guard', name: 'Bulwark',
     role: 'Orbits its own tower and intercepts anything that comes for it.',
-    aimError: 0.06, engageRange: 560, standoff: 220, strafe: 0.6, speed: 0.94,
+    aimError: 0.06, engageRange: 560, standoff: 220, strafe: 0.6, speed: 0.94, reaction: 1.0,
   },
 ];
 
+// A sighting older than this is forgotten: brief LOS breaks (driving past a
+// pillar) keep a target warm, but real cover, a retreat, or a respawn (8 s)
+// goes cold — and a cold target costs the bot a fresh reaction delay.
+const REACTION_MEMORY_TICKS = Math.round(1.5 * TICK_RATE);
 const GUARD_LEASH = 330;       // how far Bulwark will stray from its tower
 const SELF_DEFENCE_RANGE = 260; // a sieging bot only breaks off for tanks this close
 const HUNT_CHASE_RANGE = 900;  // beyond this, Stalker pushes the objective instead
@@ -275,15 +282,38 @@ export function botInput(room, bot, tick) {
   const towerFirst = prof.key === 'rush' && canHitTower
     && (!canHitTank || near.dist > SELF_DEFENCE_RANGE);
 
+  let targetKey = null;
   if (towerFirst) {
     aim = Math.atan2(enemyTower.y - me.y, enemyTower.x - me.x) + (Math.random() - 0.5) * prof.aimError;
     firing = true;
+    targetKey = 'tower';
   } else if (canHitTank) {
     aim = aimAt(me, near.player.tank, prof);
     firing = true;
+    targetKey = `tank:${near.player.id}`;
   } else if (canHitTower && prof.key !== 'guard') {
     aim = Math.atan2(enemyTower.y - me.y, enemyTower.x - me.x) + (Math.random() - 0.5) * prof.aimError;
     firing = true;
+    targetKey = 'tower';
+  }
+
+  // Reaction time — the player's guaranteed first move. A bot that notices a
+  // target swings its turret onto it immediately (readable intent, a dodge
+  // window) but holds fire for about a second, like a human registering a
+  // threat. Per-target sightings stay warm through momentary LOS breaks so a
+  // pillar doesn't reset the clock mid-duel, and go cold via
+  // REACTION_MEMORY_TICKS — so re-peeking from real cover, or either side
+  // respawning, hands the player a fresh window.
+  if (firing) {
+    let s = ai.seen[targetKey];
+    if (!s || tick - s.at > REACTION_MEMORY_TICKS) {
+      s = ai.seen[targetKey] = {
+        at: tick,
+        readyAt: tick + Math.round(prof.reaction * (0.85 + Math.random() * 0.4) * TICK_RATE),
+      };
+    }
+    s.at = tick;
+    if (tick < s.readyAt) firing = false;
   }
 
   // Friendly fire is on — never pull the trigger through a teammate.

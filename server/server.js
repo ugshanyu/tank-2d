@@ -125,7 +125,7 @@ function addBot(room) {
     inputQueue: [], lastAckSeq: 0, turret: 0, pendingAim: null,
     nextFireAt: -10, respawnAt: 0, reloadAt: 0, powerUntil: 0, powerShots: 0, shieldBlocks: 0,
     hist: new Float32Array(HIST_TICKS * 2), histFilled: false,
-    ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1 },
+    ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1, seen: {} },
   };
   room.players.set(id, bot);
   room.broadcastJson({ t: 'join', id, name: bot.name, team, bot: true });

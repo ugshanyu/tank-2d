@@ -53,7 +53,11 @@ every bot goes with them so abandoned rooms don't simulate forever.
 
 All three lead their shots, strafe while engaged, hold fire when a teammate is in
 the line (friendly fire is on), fall back toward their own tower below ~34% HP,
-and have per-profile aim error so they miss like people do.
+and have per-profile aim error so they miss like people do. They also have
+**human reaction time**: a bot that notices you swings its turret onto you at
+once but holds fire for about a second (per-profile, Stalker the longest), and a
+target it loses for more than a moment — real cover, a retreat, a respawn — has
+to be noticed all over again. The first shot in any encounter is yours to take.
 
 Bots are **not** part of the deterministic shared sim — they only synthesise an
 input packet each tick, which then runs through the same `stepTank`/`tryFire`
