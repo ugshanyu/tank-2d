@@ -103,13 +103,41 @@ class Room {
 }
 
 // ---------- bots ----------
-// Empty seats are filled with bots so a solo launch is a real 2v2, and freed the
-// instant a human wants one. A room with no humans left keeps no bots — otherwise
-// abandoned rooms would simulate forever.
-function addBot(room) {
+// Bots fill only the seats a real player is not using, and are freed the instant
+// one wants them. A room with no humans left keeps no bots — otherwise abandoned
+// rooms would simulate forever.
+//
+// The room GROWS with its population instead of always being a 2v2:
+//
+//   1 human  -> 1v1  (one bot opponent)
+//   2 humans -> 1v1  (the joiner took the bot's seat)
+//   3 humans -> 2v2  (one bot fills the empty seat)
+//   4 humans -> 2v2  (all human; the room is full and the platform's world
+//                     matchmaking sends the next player to another room)
+//
+// A lone player facing ONE opponent is the readable version of this game: the
+// old always-2v2 fill gave them a `rush` teammate whose designed job is to trade
+// its life, so the player spent ~40% of the match effectively 1-v-2 while their
+// teammate sat in respawn (measured).
+function targetTeamSize(room) {
+  const h = [0, 0];
+  for (const p of room.players.values()) if (!p.isBot) h[p.tank.team]++;
+  // Stay 1v1 only while the humans genuinely fit in it. Departures can strand
+  // two humans on the SAME team; that has to grow to 2v2 (with bots opposite)
+  // rather than collapse into a 2v0.
+  return (h[0] + h[1] <= 2 && Math.max(h[0], h[1]) <= 1) ? 1 : 2;
+}
+
+function teamSize(room, team) {
+  let n = 0;
+  for (const p of room.players.values()) if (p.tank.team === team) n++;
+  return n;
+}
+
+function addBot(room, forceTeam) {
   const id = room.freeId();
   if (!id) return false;
-  const team = room.pickTeam();
+  const team = forceTeam === undefined ? room.pickTeam() : forceTeam;
   // Roles are picked PER TEAM, not per room. Room-wide picking meant a solo
   // player's first bot (the sieger) landed on the enemy side and their own
   // teammate got whatever was left — one team pushed the objective and the other
@@ -132,6 +160,14 @@ function addBot(room) {
   return true;
 }
 
+function removeBot(room, victim) {
+  if (!victim) return false;
+  room.players.delete(victim.id);
+  room.bullets = room.bullets.filter((b) => b.owner !== victim.id);
+  room.broadcastJson({ t: 'leave', id: victim.id });
+  return true;
+}
+
 function dropBot(room) {
   // drop from the largest team so removing a bot leaves the sides balanced
   const counts = new Array(TEAM_COUNT).fill(0);
@@ -141,11 +177,14 @@ function dropBot(room) {
     if (!p.isBot) continue;
     if (!victim || counts[p.tank.team] > counts[victim.tank.team]) victim = p;
   }
-  if (!victim) return false;
-  room.players.delete(victim.id);
-  room.bullets = room.bullets.filter((b) => b.owner !== victim.id);
-  room.broadcastJson({ t: 'leave', id: victim.id });
-  return true;
+  return removeBot(room, victim);
+}
+
+function dropBotFromTeam(room, team) {
+  for (const p of room.players.values()) {
+    if (p.isBot && p.tank.team === team) return removeBot(room, p);
+  }
+  return false;
 }
 
 function ensureBots(room) {
@@ -158,7 +197,14 @@ function ensureBots(room) {
     for (const p of [...room.players.values()]) if (p.isBot) room.players.delete(p.id);
     return;
   }
-  while (room.players.size < MAX_PLAYERS_PER_ROOM && addBot(room)) { /* fill */ }
+  // Rebalance BOTH sides to the size the current population calls for. Doing it
+  // per team (rather than filling the room to a fixed 4) is what makes the room
+  // grow 1v1 -> 2v2 as humans arrive and shrink back as they leave.
+  const target = targetTeamSize(room);
+  for (let team = 0; team < TEAM_COUNT; team++) {
+    while (teamSize(room, team) > target && dropBotFromTeam(room, team)) { /* shed */ }
+    while (teamSize(room, team) < target && addBot(room, team)) { /* fill */ }
+  }
 }
 
 // `invite` only takes effect when the room is CREATED — a later joiner cannot
@@ -722,8 +768,13 @@ wss.on('connection', (ws, req) => {
             try { existing.ws.close(4008, 'replaced by newer session'); } catch { /* already gone */ }
           }
         }
-        // a human always outranks a bot for a seat
-        if (!r.freeId()) dropBot(r);
+        // A human always outranks a bot for a seat. "Full" here means the size
+        // the CURRENT population calls for, not the hard cap of 4: a 1v1 that
+        // still has two unused ids is full as far as the joiner is concerned, so
+        // they replace the bot instead of appearing as an unbalancing 3rd tank.
+        // ensureBots() below then re-reads the new human count and grows the
+        // room to 2v2 when the third player makes that the right shape.
+        if (r.players.size >= 2 * targetTeamSize(r) || !r.freeId()) dropBot(r);
         const id = r.freeId();
         if (!id) { ws.send(JSON.stringify({ t: 'error', reason: 'room full' })); ws.close(4001); return; }
         clearTimeout(helloTimer);

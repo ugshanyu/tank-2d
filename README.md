@@ -13,7 +13,23 @@ and no off-screen threat.
 
 - **Two teams**, BLUE (bottom) and RED (top), max 4 players. Joiners are
   auto-balanced onto the smaller team, and **empty seats are filled with bots**,
-  so a solo launch is still a real 2v2 and nobody waits in a lobby.
+  so nobody ever waits in a lobby.
+- **The room grows with its population.** A solo launch is a **1v1** against one
+  bot — not a 2v2 — and every real player who arrives takes a bot's seat:
+
+  | Humans | Shape | Bots |
+  |---|---|---|
+  | 1 | 1v1 | 1 |
+  | 2 | 1v1 | 0 |
+  | 3 | 2v2 | 1 |
+  | 4 | 2v2 | 0 |
+
+  The 5th player is refused, and the platform's world matchmaking puts them in
+  another room (`server/server.js` `targetTeamSize` / `ensureBots`). It shrinks
+  the same way as people leave. A 1v1 default is the readable version of this
+  game: the old always-2v2 fill gave a lone player a `rush` teammate whose
+  designed job is to trade its life, so they spent ~40% of the match effectively
+  1-v-2 while that teammate sat in respawn.
 - **Each team has a tower.** Destroy the enemy tower (400 HP, 12 shells) and your
   team wins the match; it restarts automatically after 6 s. Kills are pressure,
   not the objective.

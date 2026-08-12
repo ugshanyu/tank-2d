@@ -435,7 +435,26 @@ async function checkNoRevives(port) {
   const minMs = 12000, maxMs = 40000;
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs && (Date.now() - t0 < minMs || deathsSeen === 0)) {
-    if (game.me) game.tick({ moveX: 0, moveY: 0, firing: false }, 0);
+    // The probe has to FIGHT to see a corpse. In a 1v1 its only opponent is a
+    // sieger that stands off outside tower range and would never die on its
+    // own, so an idle probe observed zero deaths and the check went vacuous.
+    // Hunting the nearest enemy also exercises the real fire path this test is
+    // about: the client may only draw a tank dead once the SERVER says so.
+    if (game.me) {
+      let tx = 0, ty = 0, best = Infinity;
+      for (const st of game.remoteStates(game.frame(0), 0)) {
+        if (!st.alive || st.team === game.me.team) continue;
+        const d = Math.hypot(st.x - game.me.x, st.y - game.me.y);
+        if (d < best) { best = d; tx = st.x; ty = st.y; }
+      }
+      const aim = best < Infinity ? Math.atan2(ty - game.me.y, tx - game.me.x) : 0;
+      const drive = best < Infinity && best > 220;
+      game.tick({
+        moveX: drive ? Math.cos(aim) : 0,
+        moveY: drive ? Math.sin(aim) : 0,
+        firing: best < Infinity,
+      }, aim);
+    }
     const renderMs = game.frame(DT);
     for (const st of game.remoteStates(renderMs, DT)) {
       if (st.alive) { seenAlive.add(st.id); drawnDead.delete(st.id); continue; }
@@ -693,8 +712,9 @@ async function checkLobby() {
   host.sendJson({ t: 'start' });
   await sleep(700);
   check(host.ev('matchstart').length === 1, 'the host starts the match');
-  check(host.snap.tanks.length === MAX_PLAYERS_PER_ROOM,
-    `and the empty seats fill with bots at that moment (${host.snap.tanks.length})`);
+  // Two friends who waited together ARE the match — a 1v1 needs no bot at all.
+  check(host.snap.tanks.length === 2 && host.snap.tanks.every((t) => !t.bot),
+    `two friends start as a 1v1 with no bots (${host.snap.tanks.length} tanks)`);
   host.close(); friend.close();
   await sleep(400);
 
@@ -704,16 +724,16 @@ async function checkLobby() {
   await sleep(700);
   check(rando.ev('welcome')[0].phase === 'playing',
     `a random room is born playing, never waiting (${rando.ev('welcome')[0].phase})`);
-  check(rando.snap.tanks.length === MAX_PLAYERS_PER_ROOM,
-    `and is bot-filled immediately (${rando.snap.tanks.length} tanks)`);
+  check(rando.snap.tanks.length === 2,
+    `and is given a 1v1 opponent immediately (${rando.snap.tanks.length} tanks)`);
 
   // ---- a second random joins that same room and evicts a bot ----
   const rando2 = new Bot('rando2', BOT_PORT);
   await rando2.connect('worldroom', false);
   await sleep(600);
   const roster = rando2.ev('welcome')[0].players;
-  check(roster.filter((p) => !p.bot).length === 2 && roster.length === MAX_PLAYERS_PER_ROOM,
-    `a joining human takes a bot's seat, not a 5th (${roster.filter((p) => !p.bot).length} humans of ${roster.length})`);
+  check(roster.filter((p) => !p.bot).length === 2 && roster.length === 2,
+    `a stranger takes the BOT's seat, not a 3rd one (${roster.filter((p) => !p.bot).length} humans of ${roster.length})`);
   rando.close(); rando2.close();
   await sleep(400);
 }
@@ -1195,15 +1215,17 @@ async function botPhase() {
     await solo.connect('botroom');
     await sleep(700);
 
+    // A LONE PLAYER GETS A 1v1, not a 2v2. The room grows with its population
+    // (see targetTeamSize in server.js): a solo launch is one opponent, and real
+    // players take the bot seats as they arrive.
     const tanks = solo.snap.tanks;
-    check(tanks.length === 4, `lone player topped up to 2v2 (${tanks.length} tanks)`);
+    check(tanks.length === 2, `lone player gets a 1v1 (${tanks.length} tanks)`);
 
     const botJoins = solo.ev('join').filter((e) => e.bot);
-    check(botJoins.length === 3, `3 bots joined (${botJoins.length})`);
+    check(botJoins.length === 1, `exactly 1 bot joined (${botJoins.length})`);
     const names = botJoins.map((e) => e.name);
-    // Roles are distinct WITHIN a team, not across the room: each side starts
-    // from the sieger, so both towers come under attack. Two Blitzes on opposite
-    // teams is the correct outcome, not a duplicate.
+    // Roles are distinct WITHIN a team, so a side never fields two of the same
+    // archetype however large the room grows.
     const perTeam = new Map();
     for (const e of botJoins) {
       if (!perTeam.has(e.team)) perTeam.set(e.team, []);
@@ -1211,12 +1233,11 @@ async function botPhase() {
     }
     const roleClash = [...perTeam.values()].some((ns) => new Set(ns).size !== ns.length);
     check(!roleClash, `no duplicate roles inside a team (${names.join(', ')})`);
-    const everySideAttacks = [...perTeam.values()].every((ns) => ns.includes('Blitz'));
-    check(everySideAttacks, `every bot side has a tower attacker (${names.join(', ')})`);
 
     const myTeam = solo.ev('welcome')[0].team;
     const mine = tanks.filter((t) => t.team === myTeam).length;
-    check(mine === 2 && tanks.length - mine === 2, `sides balanced 2v2 (${mine} v ${tanks.length - mine})`);
+    check(mine === 1 && tanks.length - mine === 1, `sides balanced 1v1 (${mine} v ${tanks.length - mine})`);
+    check(botJoins.every((e) => e.team !== myTeam), `the bot is my OPPONENT, not my teammate`);
 
     // ---- do they actually play? ----
     const before = tanks.filter((t) => t.id !== solo.id).map((t) => ({ id: t.id, x: t.x, y: t.y }));
@@ -1226,7 +1247,7 @@ async function botPhase() {
       const a = after.find((t) => t.id === b.id);
       return a && Math.hypot(a.x - b.x, a.y - b.y) > 40;
     }).length;
-    check(moved >= 2, `bots are driving (${moved}/3 moved >40px)`);
+    check(moved >= 1, `bots are driving (${moved}/${before.length} moved >40px)`);
     const botShots = solo.ev('fire').filter((e) => e.id !== solo.id && e.id < TOWER_OWNER_BASE);
     check(botShots.length > 0, `bots are shooting (${botShots.length} shots)`);
 
@@ -1238,7 +1259,7 @@ async function botPhase() {
     await checkLobby();
 
     check(solo.ev('leave').length === leavesBefore + 1, 'a bot gave up its seat for the 2nd human');
-    check(solo.snap.tanks.length === 4, `still exactly 4 tanks (${solo.snap.tanks.length})`);
+    check(solo.snap.tanks.length === 2, `still a 1v1, now all human (${solo.snap.tanks.length} tanks)`);
 
     // ---- EVERY human gets a seat: joins 3 and 4 each kick a bot too ----
     const third = new Bot('human3', BOT_PORT);
@@ -1263,7 +1284,7 @@ async function botPhase() {
     await revisit.connect('botroom');
     await sleep(700);
     check(revisit.id === 1, `abandoned room reclaimed, ids reset (got ${revisit.id})`);
-    check(revisit.snap.tanks.length === 4, `refilled to 2v2 for the newcomer (${revisit.snap.tanks.length})`);
+    check(revisit.snap.tanks.length === 2, `refilled to a 1v1 for the newcomer (${revisit.snap.tanks.length})`);
     revisit.close();
 
     // ---- the reported bug, end to end: no tank ever revives on screen ----
