@@ -10,7 +10,8 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, TOWER_RADIUS, TOWER_RANGE, TICK_RATE,
-  BULLET_SPEED, MAX_HP,
+  BULLET_SPEED, MAX_HP, POWER, RUNE_SPOTS, BULLET_DAMAGE, POWERSHOT_TOWER_DAMAGE,
+  RESPAWN_DELAY, FIRE_COOLDOWN,
 } from '../client/shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../client/shared/sim.js';
 
@@ -42,6 +43,26 @@ export const BOT_PROFILES = [
 // pillar) keep a target warm, but real cover, a retreat, or a respawn (8 s)
 // goes cold — and a cold target costs the bot a fresh reaction delay.
 const REACTION_MEMORY_TICKS = Math.round(1.5 * TICK_RATE);
+// ---- valuing a rune ----
+// What each power is worth as a detour, in "arena lengths I would walk for it".
+// POWER SHOT leads by a distance: it is a guaranteed kill AND 140 to a tower,
+// i.e. four normal shells in one trigger pull, so it is worth crossing the map.
+const POWER_VALUE = [];
+POWER_VALUE[POWER.POWERSHOT] = 1.7;
+POWER_VALUE[POWER.DOUBLE] = 1.0;
+POWER_VALUE[POWER.SHIELD] = 0.9;
+POWER_VALUE[POWER.SPEED] = 0.7;
+// Every rune also heals to FULL, which for a hurt tank is worth more than the
+// power itself — a 20hp bot detouring for a rune is choosing not to die.
+const RUNE_HEAL_VALUE = 1.6;
+// Travel cost: a rune this far away costs one full unit of value. Roughly half
+// the arena, so a POWER SHOT is worth crossing it and OVERDRIVE is not.
+const RUNE_REACH = 700;
+// Don't chase what an enemy will plainly reach first — that just feeds a kill
+// to a tank that arrives with a fresh power. Their lead has to be real, not a
+// rounding error, or two bots would each stand off waiting for the other.
+const RUNE_LEAD_MARGIN = 70;
+
 const GUARD_LEASH = 330;       // how far Bulwark will stray from its tower
 const SELF_DEFENCE_RANGE = 260; // a sieging bot only breaks off for tanks this close
 const HUNT_CHASE_RANGE = 900;  // beyond this, Stalker pushes the objective instead
@@ -235,6 +256,70 @@ function enemiesOf(room, bot) {
   return out;
 }
 
+// Is a rune on the field worth walking to right now? Returns the best one, or
+// null to carry on with the archetype's normal job. Bots used to have no rune
+// logic at all — they only ever picked one up by driving over it — so a player
+// could farm every wave uncontested.
+export function runePlan(room, bot) {
+  const me = bot.tank;
+  const heal = ((MAX_HP - me.hp) / MAX_HP) * RUNE_HEAL_VALUE;
+  let best = null;
+  for (let i = 0; i < RUNE_SPOTS.length; i++) {
+    const kind = room.runes[i];
+    if (!kind) continue;                     // claimed, or none this wave
+    const spot = RUNE_SPOTS[i];
+    const d = Math.hypot(spot.x - me.x, spot.y - me.y);
+    let enemyD = Infinity;
+    for (const p of room.players.values()) {
+      if (!p.tank.alive || p.tank.team === me.team) continue;
+      enemyD = Math.min(enemyD, Math.hypot(spot.x - p.tank.x, spot.y - p.tank.y));
+    }
+    if (enemyD < d - RUNE_LEAD_MARGIN) continue;
+    const score = (POWER_VALUE[kind] || 0.5) + heal - d / RUNE_REACH;
+    if (score > 0 && (!best || score > best.score)) best = { x: spot.x, y: spot.y, score, kind };
+  }
+  return best;
+}
+
+// Shells needed to finish something. One shell a second, so this IS time — the
+// only currency the bot can compare a tank against a tower in.
+function shellsToKill(hp, dmg) { return Math.max(1, Math.ceil(hp / dmg)); }
+
+/**
+ * Tower, or the tank in front of me? Pure so the decision can be tested without
+ * a map: what the bot can SEE is decided by the caller (LOS, range), this only
+ * prices the options it was handed.
+ *
+ * A sieger used to ignore anything past SELF_DEFENCE_RANGE, which is how a bot
+ * ended up plinking a 560hp tower while a 20hp player farmed it from 300px.
+ *
+ * @returns {'tower'|'tank'|null}
+ */
+export function chooseTarget({ profileKey, me, near, canHitTank, canHitTower, enemyTower, towerHp }) {
+  const towerOk = canHitTower && profileKey !== 'guard';   // guards never siege
+  if (!towerOk) return canHitTank ? 'tank' : null;
+  if (!canHitTank) return 'tower';
+
+  const powerShot = me.power === POWER.POWERSHOT;
+  const towerShells = shellsToKill(towerHp, powerShot ? POWERSHOT_TOWER_DAMAGE : BULLET_DAMAGE);
+  const tankShells = shellsToKill(near.player.tank.hp, powerShot ? MAX_HP : BULLET_DAMAGE);
+
+  // A kill buys the siege RESPAWN_DELAY seconds of nobody shooting back — about
+  // five shells at one a second. It only buys that if the tank was actually in
+  // the way though: killing someone busy at the far end of the map buys nothing
+  // and stops our own clock, which is the trap a naive "always shoot the
+  // player" bot falls into.
+  const KILL_BUYS = RESPAWN_DELAY / FIRE_COOLDOWN;
+  const inTheWay =
+    Math.hypot(near.player.tank.x - enemyTower.x, near.player.tank.y - enemyTower.y) < TOWER_RANGE + 120
+    || near.dist < SELF_DEFENCE_RANGE;
+
+  if (towerShells <= 2) return 'tower';                    // one volley from winning — finish it
+  if (tankShells <= 1) return 'tank';                      // a kill for one shell is always worth it
+  if (inTheWay && tankShells < KILL_BUYS) return 'tank';
+  return profileKey === 'rush' ? 'tower' : 'tank';
+}
+
 function nearest(from, list) {
   let best = null, bestD = Infinity;
   for (const p of list) {
@@ -275,26 +360,22 @@ export function botInput(room, bot, tick) {
     && towerDist < 900
     && losClear(me.x, me.y, enemyTower.x, enemyTower.y, enemyTowerIdx);
 
-  // Blitz prioritises the objective. It only breaks off to deal with a tank that
-  // is genuinely on top of it — the old rule (any visible tank nearer than the
-  // tower wins) meant a single defender orbiting its base cancelled the siege
-  // entirely, which is why the objective barely took damage.
-  const towerFirst = prof.key === 'rush' && canHitTower
-    && (!canHitTank || near.dist > SELF_DEFENCE_RANGE);
+  // ---- tower, or the tank in front of me? ----
+  const target = chooseTarget({
+    profileKey: prof.key, me, near, canHitTank, canHitTower,
+    enemyTower, towerHp: room.towers[enemyTowerIdx]?.hp ?? 0,
+  });
+  const towerFirst = target === 'tower';
 
   let targetKey = null;
-  if (towerFirst) {
+  if (target === 'tower') {
     aim = Math.atan2(enemyTower.y - me.y, enemyTower.x - me.x) + (Math.random() - 0.5) * prof.aimError;
     firing = true;
     targetKey = 'tower';
-  } else if (canHitTank) {
+  } else if (target === 'tank') {
     aim = aimAt(me, near.player.tank, prof);
     firing = true;
     targetKey = `tank:${near.player.id}`;
-  } else if (canHitTower && prof.key !== 'guard') {
-    aim = Math.atan2(enemyTower.y - me.y, enemyTower.x - me.x) + (Math.random() - 0.5) * prof.aimError;
-    firing = true;
-    targetKey = 'tower';
   }
 
   // Reaction time — the player's guaranteed first move. A bot that notices a
@@ -329,8 +410,16 @@ export function botInput(room, bot, tick) {
   }
 
   // ---- where am I going? ----
+  // A rune outranks the archetype's normal job when it is worth the walk: it is
+  // a full heal plus 7s of a power, and leaving it standing hands it to the
+  // other side. runePlan prices that against the detour, so a bot crosses the
+  // map for a POWER SHOT, grabs anything when it is hurt, and ignores an
+  // OVERDRIVE on the far side of the arena.
+  const rune = runePlan(room, bot);
   let goal;
-  if (prof.key === 'guard') {
+  if (rune) {
+    goal = { x: rune.x, y: rune.y };
+  } else if (prof.key === 'guard') {
     // Hold the tower, but chase anything within the leash OR anything we can
     // already shoot. The old version only reacted to enemies near its own tower,
     // so it spent whole matches orbiting an empty base doing nothing.
@@ -370,8 +459,11 @@ export function botInput(room, bot, tick) {
   // so nothing is lost by standing off, and the bot stops trading its life to the
   // tower every few seconds — which is what kept it walking back from spawn
   // instead of shooting the objective.
+  // Never stand off from a RUNE: the whole point is to drive onto it, and the
+  // back-off below would otherwise park the bot just outside the pickup circle
+  // shooting at something, which looks exactly like a bot that cannot reach it.
   const standoffTarget = towerFirst ? TOWER_RANGE + 45 : prof.standoff;
-  const engaged = firing && goalDist < standoffTarget;
+  const engaged = firing && !rune && goalDist < standoffTarget;
   if (engaged) {
     const away = Math.atan2(me.y - goal.y, me.x - goal.x);
     const perp = away + Math.PI / 2 * (ai.strafeDir || 1);
@@ -405,8 +497,11 @@ export function botInput(room, bot, tick) {
   // Only a live tank is worth retreating FROM: a bot plinking the tower from
   // outside its range is in no danger, and walking home from there just meant it
   // spent the next ten seconds not attacking anything.
+  // ...unless there is a rune to run to. It heals to full, so a hurt bot going
+  // for one is choosing the better retreat — and it comes back with a power
+  // instead of just coming back.
   const threatened = near && near.dist < prof.engageRange;
-  if (me.hp <= MAX_HP * 0.34 && threatened && ai.evadeUntil <= tick) {
+  if (!rune && me.hp <= MAX_HP * 0.34 && threatened && ai.evadeUntil <= tick) {
     const back = steer(me, ownTower.x, ownTower.y, 1);
     if (back.x || back.y) { mx = back.x; my = back.y; }
   }

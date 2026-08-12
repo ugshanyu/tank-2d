@@ -86,7 +86,22 @@ every bot goes with them so abandoned rooms don't simulate forever.
 
 All three lead their shots, strafe while engaged, hold fire when a teammate is in
 the line (friendly fire is on), fall back toward their own tower below ~34% HP,
-and have per-profile aim error so they miss like people do. They also have
+and have per-profile aim error so they miss like people do.
+
+**They contest the runes.** A bot prices each live rune against the walk
+(`runePlan`): it crosses the map for a POWER SHOT, ignores an OVERDRIVE on the
+far side, grabs anything at all when it is hurt — every rune heals to full, so a
+wounded bot running for one is choosing the better retreat — and it won't chase
+a rune an enemy plainly reaches first. Leaving every wave uncontested was free
+value for the player.
+
+**They pick their target.** Tower and tank are priced in the same currency —
+shells, at one a second (`chooseTarget`): a kill buys about five shells of
+unopposed siege time, so it's worth taking when it costs less than that AND the
+tank was actually in the way. A 20 HP defender dies rather than being ignored
+while the bot plinks a 560 HP tower; a healthy tank loitering out of the way
+doesn't distract it; and a tower two shells from falling outranks even a free
+kill, because that ends the match. They also have
 **human reaction time**: a bot that notices you swings its turret onto you at
 once but holds fire for about a second (per-profile, Stalker the longest), and a
 target it loses for more than a moment — real cover, a retreat, a respawn — has

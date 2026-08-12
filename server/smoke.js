@@ -516,6 +516,68 @@ async function checkAdaptiveInterp() {
   }
 }
 
+// What the bot DECIDES: whether a rune is worth the walk, and whether the tank
+// in front of it is a better target than the tower. Both are pure functions —
+// deciding what to do is separate from pathing to it, and testing them through
+// a live match would really just be measuring whether a wall was in the way.
+async function checkBotBrain() {
+  const { runePlan, chooseTarget, BOT_PROFILES } = await import('./bot.js');
+  const { POWER, RUNE_SPOTS, TOWER_HP } = await import('../client/shared/protocol.js');
+  const { TOWERS } = await import('../client/shared/sim.js');
+  const ENEMY_TOWER = TOWERS[1];
+
+  const tank = (id, x, y, team, hp = MAX_HP, power = POWER.NONE) =>
+    ({ id, x, y, vx: 0, vy: 0, alive: true, team, turret: 0, hp, ammo: 5, power });
+  const world = ({ botAt, botHp = MAX_HP, profile = 'rush', runes = [0, 0], enemies = [] }) => {
+    const bot = {
+      id: 1, isBot: true,
+      profile: BOT_PROFILES.find((p) => p.key === profile),
+      tank: tank(1, botAt[0], botAt[1], 0, botHp),
+      ai: { stuckTicks: 0, evadeUntil: 0, evadeDir: 1, strafeDir: 1, seen: {} },
+    };
+    const players = new Map([[1, bot]]);
+    enemies.forEach((e, i) => players.set(10 + i, { id: 10 + i, tank: tank(10 + i, e.x, e.y, 1, e.hp ?? MAX_HP) }));
+    return { bot, room: { players, towers: [{ hp: TOWER_HP }, { hp: TOWER_HP }], runes } };
+  };
+
+  // ---- runes: worth the detour? ----
+  let w = world({ botAt: [220, 900], runes: [POWER.POWERSHOT, 0] });
+  check(runePlan(w.room, w.bot)?.kind === POWER.POWERSHOT, 'a bot walks to a nearby POWER SHOT');
+  w = world({ botAt: [560, 1180], runes: [POWER.SPEED, 0] });
+  check(runePlan(w.room, w.bot) === null, 'but ignores an OVERDRIVE clear across the map');
+  w = world({ botAt: [560, 1180], runes: [POWER.POWERSHOT, 0] });
+  check(runePlan(w.room, w.bot) !== null, 'and crosses that same map for a POWER SHOT');
+  w = world({ botAt: [560, 1180], botHp: 20, runes: [POWER.SPEED, 0] });
+  check(runePlan(w.room, w.bot) !== null, 'at 20hp it runs for ANY rune — they heal to full');
+  w = world({ botAt: [220, 1040], runes: [POWER.DOUBLE, 0], enemies: [{ x: 220, y: 440 }] });
+  check(runePlan(w.room, w.bot) === null, 'it does not feed itself chasing a rune an enemy reaches first');
+  w = world({ botAt: [360, 780], runes: [POWER.SPEED, POWER.POWERSHOT] });
+  check(runePlan(w.room, w.bot)?.x === RUNE_SPOTS[1].x, 'with both gates live it takes the better one, not the nearer');
+
+  // ---- target: the player, or the tower? ----
+  const near = (x, y, hp, dist) => ({ player: { id: 10, tank: tank(10, x, y, 1, hp) }, dist });
+  const base = {
+    profileKey: 'rush', me: tank(1, 360, 560, 0),
+    canHitTank: true, canHitTower: true, enemyTower: ENEMY_TOWER,
+  };
+  check(chooseTarget({ ...base, near: near(360, 250, 20, 310), towerHp: TOWER_HP }) === 'tank',
+    'it kills a 20hp defender rather than plink a 560hp tower');
+  check(chooseTarget({ ...base, near: near(120, 900, MAX_HP, 450), towerHp: TOWER_HP }) === 'tower',
+    'but a healthy tank that is not in the way does not distract it');
+  check(chooseTarget({ ...base, near: near(360, 250, 20, 310), towerHp: 40 }) === 'tower',
+    'a tower 2 shells from falling outranks even a free kill');
+  check(chooseTarget({ ...base, near: near(360, 200, MAX_HP, 360), towerHp: TOWER_HP }) === 'tank',
+    'it clears a healthy defender camping the tower');
+  check(chooseTarget({ ...base, profileKey: 'guard', near: near(360, 250, MAX_HP, 310), towerHp: 40 }) === 'tank',
+    'a guard still never sieges');
+  check(chooseTarget({ ...base, canHitTank: false, canHitTower: false, near: near(360, 250, 20, 310), towerHp: TOWER_HP }) === null,
+    'nothing in sight -> no target');
+  check(chooseTarget({
+    ...base, me: tank(1, 360, 560, 0, MAX_HP, POWER.POWERSHOT),
+    near: near(360, 200, MAX_HP, 310), towerHp: TOWER_HP,
+  }) === 'tank', 'holding a POWER SHOT, a full-health camper is a one-shell kill — take it');
+}
+
 // The rune ROLL itself. A live wave lands every 10s, so watching real matches
 // could never say anything about the distribution — but the distribution IS the
 // balance here, so it gets asserted directly against the real function.
@@ -1098,6 +1160,7 @@ async function main() {
   await checkAdaptiveInterp();
   await checkProfile();
   await checkAuth();
+  await checkBotBrain();
   await checkRuneRoll();
   await checkAward();
   console.log('starting server…');
@@ -1295,6 +1358,18 @@ async function botPhase() {
     check(moved >= 1, `bots are driving (${moved}/${before.length} moved >40px)`);
     const botShots = solo.ev('fire').filter((e) => e.id !== solo.id && e.id < TOWER_OWNER_BASE);
     check(botShots.length > 0, `bots are shooting (${botShots.length} shots)`);
+
+    // ---- and they contest the runes, end to end ----
+    // The decision is unit-tested in checkBotBrain; this proves it survives
+    // pathing and actually reaches the pickup circle in a live match. Waves land
+    // every 10 s, so give it a couple of them. solo sits still and never
+    // competes for the gate.
+    const runeT0 = Date.now();
+    while (Date.now() - runeT0 < 32000 && !solo.ev('rune').some((e) => e.taker !== solo.id)) {
+      await sleep(500);
+    }
+    const botRunes = solo.ev('rune').filter((e) => e.taker !== solo.id);
+    check(botRunes.length > 0, `a bot went and claimed a rune (${botRunes.length} claimed)`);
 
     // ---- a human outranks a bot for a seat ----
     const leavesBefore = solo.ev('leave').length;
