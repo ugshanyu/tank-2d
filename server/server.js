@@ -15,13 +15,14 @@ import {
   MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
   MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
-  POWER, RUNE_PERIOD, RUNE_CYCLE, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
+  POWER, RUNE_PERIOD, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
   POWER_SHOTS, SHIELD_BLOCKS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
+import { rollRunePair } from './runes.js';
 import { validateAccessToken } from './auth.js';
-import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS, BOTS_ENABLED } from './config.js';
+import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS, BOTS_ENABLED, RUNE_FORCE } from './config.js';
 
 const MAX_CONNS = 128;
 const MAX_ROOMS = 32;
@@ -54,7 +55,7 @@ class Room {
     // power runes: one per mirrored spot, spawned as a same-kind PAIR each wave
     this.runes = [0, 0];      // kind at RUNE_SPOTS[i], 0 = empty
     this.runeAt = 0;          // tick the next wave appears (0 = schedule on first step)
-    this.runeCycle = 0;       // index into RUNE_CYCLE (deterministic rotation)
+    this.runeCycle = 0;       // waves spawned so far (only RUNE_FORCE reads it)
     this.isInvite = false;    // set once, by whoever creates the room
     this.hostId = 0;          // lowest-id human; only they may START
     this.ready = new Set();   // player ids that tapped ready
@@ -408,15 +409,17 @@ function stepRune(room) {
     }
   }
 
-  // Each wave fills BOTH spots with the same kind — one gate per team's side of
-  // the middle, at the same moment, so neither team owns the spawn. A stale
-  // unclaimed rune is overwritten by the next wave. Fixed cadence: the next
-  // wave lands RUNE_PERIOD after this one regardless of pickups.
+  // Each wave fills BOTH spots — one gate either side of the middle, at the same
+  // moment, so neither team owns the spawn — with two DIFFERENT powers drawn at
+  // random. A stale unclaimed rune is overwritten by the next wave. Fixed
+  // cadence: the next wave lands RUNE_PERIOD after this one regardless of
+  // pickups. Runes are pure server state broadcast in the snapshot byte (one
+  // nibble per gate), never predicted, so rolling them here is safe — the shared
+  // deterministic sim does not touch them.
   if (tick >= room.runeAt) {
-    const kind = RUNE_CYCLE[room.runeCycle % RUNE_CYCLE.length];
-    room.runeCycle += 1;
-    room.runes[0] = kind;
-    room.runes[1] = kind;
+    const [a, b] = rollRunePair(room.runeCycle++, RUNE_FORCE);
+    room.runes[0] = a;
+    room.runes[1] = b;
     room.runeAt = tick + Math.round(RUNE_PERIOD * TICK_RATE);
   }
 

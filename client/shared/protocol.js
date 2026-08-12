@@ -68,13 +68,13 @@ export const MAX_PLAYERS_PER_ROOM = 4;  // 2v2
 
 // ---- Power runes ----
 // Every RUNE_PERIOD seconds a PAIR of runes appears — one at each mid-arena
-// pocket, both the SAME kind, each claimable independently — so both teams get
-// the same opportunity at the same moment and neither owns the spawn. Driving
-// over one grants its power for POWER_DURATION seconds and refills health
-// instantly. Kinds CYCLE per wave rather than roll randomly: every match sees
-// every power, both teams can plan around what comes next, and tests are
-// deterministic. Everything here is server-authoritative — the client only
-// renders what the snapshot/events say.
+// pocket, each claimable independently — so both teams get the same opportunity
+// at the same moment and neither owns the spawn. Driving over one grants its
+// power for POWER_DURATION seconds and refills health instantly. The two gates
+// always carry DIFFERENT powers, rolled at random: the wave becomes a choice
+// ("shield or overdrive?") instead of a race for two copies of one thing, and
+// the middle stops being predictable. Everything here is server-authoritative —
+// the client only renders what the snapshot/events say.
 export const POWER = { NONE: 0, DOUBLE: 1, SHIELD: 2, POWERSHOT: 3, SPEED: 4 };
 export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT', 'OVERDRIVE'];
 // One colour per power, used by the rune, its pickup burst and the HUD timer, so
@@ -83,14 +83,20 @@ export const POWER_NAMES = ['', 'DOUBLE SHOT', 'SHIELD', 'POWER SHOT', 'OVERDRIV
 // bubble, the magenta power shell, the green overdrive trail.
 export const POWER_COLORS = ['', '#ffb454', '#5ad2ff', '#ff6bd6', '#6ef58f'];
 export const RUNE_PERIOD = 10;          // s between waves
-// Which power each wave carries, cycled in order. POWER SHOT is a one-shot kill
-// and 4x tower damage, so it appears ONCE per seven waves (~70 s); the other
-// three share the rest evenly, twice each. A cycle rather than a roll: both
-// teams can see what is coming and plan for it, and a bad streak of randomness
-// can never hand one side three power shots in a row.
-export const RUNE_CYCLE = [
-  POWER.DOUBLE, POWER.SHIELD, POWER.SPEED, POWER.POWERSHOT,
-  POWER.DOUBLE, POWER.SHIELD, POWER.SPEED,
+// How often each power comes up when a wave is rolled. Relative weights, not
+// percentages — the two gates draw WITHOUT replacement, so they can never show
+// the same power twice.
+//
+// POWER SHOT is deliberately the rare one: it is a guaranteed kill and 4x tower
+// damage, so it must stay an event rather than a regular option. At 1 against 6
+// it lands in ~13% of waves (roughly one per 80 s) — a touch rarer than the old
+// fixed cycle's one-in-seven, and far rarer than an even roll would make it now
+// that every wave shows TWO different powers.
+export const RUNE_WEIGHTS = [
+  { kind: POWER.DOUBLE, weight: 6 },
+  { kind: POWER.SHIELD, weight: 6 },
+  { kind: POWER.SPEED, weight: 6 },
+  { kind: POWER.POWERSHOT, weight: 1 },
 ];
 export const POWER_DURATION = 7;        // s a claimed power lasts
 export const RUNE_RADIUS = 22;          // px pickup circle (vs TANK_RADIUS 26)

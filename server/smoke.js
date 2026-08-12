@@ -516,8 +516,49 @@ async function checkAdaptiveInterp() {
   }
 }
 
-// Power runes over the real protocol. Kinds cycle deterministically
-// (double -> shield -> powershot), so a scripted match can meet each one.
+// The rune ROLL itself. A live wave lands every 10s, so watching real matches
+// could never say anything about the distribution — but the distribution IS the
+// balance here, so it gets asserted directly against the real function.
+async function checkRuneRoll() {
+  const { POWER, RUNE_WEIGHTS } = await import('../client/shared/protocol.js');
+  const { rollRunePair } = await import('./runes.js');
+
+  const N = 40000;
+  const seen = new Map();      // kind -> waves it appeared in
+  let sameKind = 0, wrongSize = 0;
+  for (let i = 0; i < N; i++) {
+    const pair = rollRunePair();
+    if (pair.length !== 2) wrongSize++;
+    if (pair[0] === pair[1]) sameKind++;
+    for (const k of new Set(pair)) seen.set(k, (seen.get(k) || 0) + 1);
+  }
+  check(wrongSize === 0 && sameKind === 0,
+    `every wave offers TWO DIFFERENT powers (${sameKind} duplicate pairs in ${N})`);
+  check(RUNE_WEIGHTS.every((w) => seen.get(w.kind) > 0),
+    `every power still shows up (${[...seen.keys()].sort().join(',')})`);
+
+  // POWER SHOT is the rare one — a guaranteed kill must stay an event. The old
+  // fixed cycle gave it 1 wave in 7 (14.3%); it must not have become MORE
+  // common now that each wave shows two powers.
+  const psPct = 100 * (seen.get(POWER.POWERSHOT) || 0) / N;
+  check(psPct < 14.3, `POWER SHOT is rarer than the old cycle (${psPct.toFixed(1)}% of waves vs 14.3%)`);
+  check(psPct > 8, `…but still actually appears (${psPct.toFixed(1)}% of waves)`);
+  const others = RUNE_WEIGHTS.filter((w) => w.kind !== POWER.POWERSHOT)
+    .map((w) => 100 * (seen.get(w.kind) || 0) / N);
+  check(Math.min(...others) > psPct * 2,
+    `and is clearly rarer than the rest (${psPct.toFixed(1)}% vs ${others.map((p) => p.toFixed(0) + '%').join('/')})`);
+
+  // Forced sequences are what keeps checkPowers deterministic — verify the seam.
+  const force = [[1, 2], [3, 4]];
+  check(JSON.stringify(rollRunePair(0, force)) === '[1,2]'
+     && JSON.stringify(rollRunePair(1, force)) === '[3,4]'
+     && JSON.stringify(rollRunePair(2, force)) === '[1,2]',
+    'RUNE_FORCE pins the sequence and wraps');
+}
+
+// Power runes over the real protocol. Live waves roll at random, so this phase
+// pins them with RUNE_FORCE (see the server's config.js) to walk P through one
+// of each power in order; the roll itself is covered by checkRuneRoll().
 // P picks every rune; W (P's teammate) supplies friendly-fire damage for the
 // heal check; V (the enemy) shoots the shield and eats the power shot.
 async function checkPowers() {
@@ -551,8 +592,8 @@ async function checkPowers() {
   let guard = 0;
   while ((!P.snap.runes || P.snap.runes.length === 0) && guard++ < 80) await P.drive(12, 0, 0);
   check(P.snap.runes.length === 2
-        && P.snap.runes[0].kind === POWER.DOUBLE && P.snap.runes[1].kind === POWER.DOUBLE,
-    `a wave fills BOTH gates with the same kind (${JSON.stringify(P.snap.runes?.map((r) => r.kind))})`);
+        && P.snap.runes[0].kind === POWER.DOUBLE && P.snap.runes[1].kind === POWER.SHIELD,
+    `a wave fills both gates with DIFFERENT kinds (${JSON.stringify(P.snap.runes?.map((r) => r.kind))})`);
 
   await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
   guard = 0;
@@ -1057,10 +1098,14 @@ async function main() {
   await checkAdaptiveInterp();
   await checkProfile();
   await checkAuth();
+  await checkRuneRoll();
   await checkAward();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
-  const srv = await startServer(PORT, { BOTS: '0' });
+  // Runes pinned so checkPowers() meets DOUBLE -> SHIELD -> OVERDRIVE -> POWER
+  // SHOT at gate 0 in that order; live waves are random (checkRuneRoll covers
+  // the roll). Each pair is two different kinds, as the real roll guarantees.
+  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4' });
 
   try {
     // ---- join ----

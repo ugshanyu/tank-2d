@@ -40,6 +40,23 @@ and no off-screen threat.
 - **Friendly fire is on**, including on your own tower. A teamkill scores nothing.
 - Tanks and shells both collide with towers; shells *detonate* on a tower rather
   than bouncing off it, which is how a tower takes damage.
+- **Power runes.** Every 10 s a pair appears at the two mid-arena gates, on the
+  halfway line, equidistant from both towers. Driving over one heals you to full
+  and grants its power for 7 s. The two gates always carry **different** powers,
+  rolled at random, so a wave is a choice — shield or overdrive? — rather than a
+  race for two copies of one thing, and the middle never becomes predictable.
+
+  | Rune | Effect | How often |
+  |---|---|---|
+  | DOUBLE SHOT | two shells per pull | common |
+  | SHIELD | absorbs 4 shots, then pops | common |
+  | OVERDRIVE | 1.55x speed | common |
+  | POWER SHOT | 2 charges; one-shots a tank, 4x tower damage | **~13% of waves** |
+
+  POWER SHOT is deliberately the rare one — a guaranteed kill has to stay an
+  event. Weights live in `RUNE_WEIGHTS` (`client/shared/protocol.js`), the draw
+  is in `server/runes.js`, and the distribution is asserted directly in the
+  smoke suite rather than left to chance.
 
 ## Progression
 

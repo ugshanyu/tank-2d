@@ -26,6 +26,16 @@ export const DEV_ALLOW_UNSIGNED = bool(env.DEV_ALLOW_UNSIGNED || '');
 // to run a bot-free server (the deterministic half of the smoke test does).
 export const BOTS_ENABLED = (env.BOTS ?? '1') !== '0';
 
+// Test-only: pin the rune waves instead of rolling them, so a test can ask for
+// a specific power. Format is comma-separated "gate0:gate1" pairs of POWER ids
+// that repeat, e.g. RUNE_FORCE=1:2,3:4 -> wave 1 DOUBLE+SHIELD, wave 2
+// POWERSHOT+OVERDRIVE, wave 3 DOUBLE+SHIELD again. Unset in production, where
+// every wave is a fresh weighted roll.
+export const RUNE_FORCE = (env.RUNE_FORCE || '')
+  .split(',').map((s) => s.trim()).filter(Boolean)
+  .map((pair) => pair.split(':').map((n) => Number(n)))
+  .filter((p) => p.length === 2 && p.every((n) => Number.isInteger(n) && n >= 0 && n <= 7));
+
 // Optional browser-origin allowlist (comma-separated). Unset = allow all.
 export const ALLOWED_ORIGINS = (env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
