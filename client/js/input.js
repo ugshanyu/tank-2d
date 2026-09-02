@@ -1,6 +1,7 @@
-// Input: tilt-to-move (device orientation) with touch-to-aim/shoot.
-// Fallbacks: virtual joystick (left half of screen) when tilt is unavailable or
-// denied, and WASD/arrows + mouse on desktop. Uses Pointer Events throughout.
+// Input: virtual joystick (left side of the screen) to drive + touch-to-aim/shoot
+// on touch devices, WASD/arrows + mouse on desktop. Tilt-to-move (device
+// orientation) is an opt-in alternative chosen in Settings. Pointer Events
+// throughout.
 
 const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
 const JOY_MAX = 52;          // px of drag for full joystick deflection. 78 was
@@ -27,12 +28,15 @@ export class Input {
     this.canvas = canvas;
     this.joyMax = JOY_MAX;
     this.mode = 'stick';               // 'tilt' | 'stick' (stick also covers kbd)
-    // Tilt is the intended way to play on a phone, so it is the DEFAULT on any
-    // touch device — but it stays switchable, because being locked into tilt with
-    // no way back is miserable on a bus or lying down.
     this.isTouch = (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
       || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
-    this.prefersTilt = this.isTouch;
+    // The joystick is the default on every device. Tilt is a real option that
+    // some players love, but as the DEFAULT it cost every phone player an OS
+    // permission prompt before their first shot, a re-level whenever they
+    // shifted in their seat, and a scheme that cannot be played lying down or
+    // on a bus. It is now an explicit choice in Settings — and, once chosen,
+    // it sticks across launches.
+    this.prefersTilt = false;
     // Default posture: 'auto' — neutral is sampled from HOWEVER the player is
     // holding the phone when tilt engages, so their current angle IS level. The
     // named presets remain as explicit choices in settings and, once chosen,
@@ -40,8 +44,11 @@ export class Input {
     this.tiltPreset = 'auto';
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
     try {
-      const stored = localStorage.getItem('tank.tilt');
-      if (stored !== null) this.prefersTilt = stored === '1';
+      // Only an EXPLICIT choice is remembered (setMode's `persist`). The legacy
+      // `tank.tilt` key was written whenever the sensor happened to engage under
+      // the old tilt-by-default, so it says nothing about what the player wanted
+      // and is deliberately ignored.
+      this.prefersTilt = localStorage.getItem('tank.steer') === 'tilt';
       const pose = localStorage.getItem('tank.tiltPose');
       // A stored 'custom' is only meaningful with the angle that went with it;
       // without one, applyTiltPreset would fail and we'd fall back to sampling.
@@ -178,13 +185,24 @@ export class Input {
 
   // Switching control scheme mid-match must cancel any stick the thumb is holding,
   // otherwise the tank keeps driving in the last joystick direction forever.
-  setMode(mode) {
-    if (mode === 'tilt' && !this.tiltReady) return false;
-    this.mode = mode;
+  //
+  // `persist` is only true for a choice the PLAYER made (Settings, the motion
+  // sheet). The automatic flip in _attachOrientation must not write anything:
+  // "the sensor reported" is not a preference.
+  setMode(mode, { persist = false } = {}) {
     this.prefersTilt = mode === 'tilt';
+    if (persist) {
+      try { localStorage.setItem('tank.steer', this.prefersTilt ? 'tilt' : 'stick'); } catch { /* ignore */ }
+    }
+    if (mode === 'tilt' && !this.tiltReady) {
+      // Preference recorded; the sensor has not reported yet. The persistent
+      // orientation listener switches us over the moment it does.
+      this._attachOrientation();
+      return false;
+    }
+    this.mode = mode;
     this.joy = null;
     this.moveX = 0; this.moveY = 0;
-    try { localStorage.setItem('tank.tilt', this.prefersTilt ? '1' : '0'); } catch { /* ignore */ }
     // Re-apply the chosen POSTURE, never re-sample the current pose. calibrate()
     // here was clobbering the preset the caller had just set — and on iOS the
     // sample was taken while the player was still tapping the permission dialog,

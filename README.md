@@ -1,7 +1,7 @@
 # TANK
 
-Realtime **2v2 tower-destruction** tank arena for mobile: **tilt your phone to drive,
-touch to aim & shoot**. Instant respawns, bouncing shells. Ships as a **Usion
+Realtime **2v2 tower-destruction** tank arena for mobile: **drag the joystick to
+drive, touch to aim & shoot** (tilt steering is an option in Settings). Instant respawns, bouncing shells. Ships as a **Usion
 direct-mode game** — identity, rooms, and invites come from the platform; the
 client talks binary WebSocket straight to this authoritative server (zero relay hop).
 
@@ -114,15 +114,16 @@ tank in the snapshot and another `fire` event on the wire. Set `BOTS=0` to run a
 bot-free server (the scripted half of `npm test` does exactly that).
 
 - **Play**: launch from the Usion app (a game invite in chat, or Explore). The game
-  starts immediately — no tap-to-start screen. Tilt to drive and touch to shoot;
-  the first touch is what grants motion access on iOS (the OS only hands it out
-  from a user gesture), and the joystick fallback drives until then. A solo
-  Explore launch drops you into a local practice arena until you invite friends
-  (host **Share** button) — then it promotes into a live match.
+  starts immediately — no tap-to-start screen. Drag anywhere on the left side to
+  drive (a virtual joystick appears under your thumb), touch the right side to aim
+  and shoot. A solo Explore launch drops you into a local practice arena until you
+  invite friends (host **Share** button) — then it promotes into a live match.
+- **Tilt** (optional): ⚙ Settings → Steering → Tilt. On iOS the OS asks for motion
+  access when you turn it on (it can only be granted from a tap). The choice is
+  remembered per device; nothing about steering is persisted until you choose.
 - **Desktop**: WASD or arrow keys to drive, mouse to aim, click or Space to fire.
   The canvas takes focus on load and on every press — inside the Usion iframe,
   keyboard events only arrive once it holds focus.
-- **Fallbacks**: no tilt sensor → virtual joystick (left half of screen).
 
 ## Usion integration — direct mode
 

@@ -658,7 +658,7 @@ const CLIENT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'client')
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json',
-  '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+  '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
 };
 
 const server = http.createServer(async (req, res) => {

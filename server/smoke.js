@@ -995,10 +995,12 @@ async function checkServiceId() {
     `dev fallback URL matches the service (${client.DEV_SERVER_URL})`);
 }
 
-// TILT IS THE HEADLINE CONTROL SCHEME and it silently never engaged: the sensor
-// got a 1.2s deadline to produce its first reading, and a WKWebView routinely
-// takes longer. Missing that window left tiltReady false forever, which ALSO
-// disabled the Tilt option in settings — so there was no way back to it.
+// THE JOYSTICK IS THE DEFAULT; tilt is an opt-in that must genuinely engage
+// once chosen. Two regressions this guards against: (1) tilt-by-default cost
+// every phone player an OS permission prompt before their first shot, and
+// (2) when tilt WAS chosen, the sensor got a 1.2s deadline to produce its first
+// reading, a WKWebView routinely takes longer, and missing that window left
+// tiltReady false forever — which ALSO disabled the Tilt option in settings.
 async function checkTilt() {
   const listeners = new Map();
   const el = () => ({ style: {}, tabIndex: 0, addEventListener() {}, focus() {} });
@@ -1029,11 +1031,18 @@ async function checkTilt() {
   };
 
   check(input.tiltSupported(), 'tilt is offered whenever the device type exists');
-  check(input.prefersTilt === true, 'tilt is the DEFAULT on a touch device');
+  check(input.prefersTilt === false, 'the JOYSTICK is the default on a touch device; tilt is opt-in');
+  check(input.needsTiltPrompt() === false, 'a joystick player is never asked for motion access');
+  check((listeners.get('deviceorientation') || []).length === 0,
+    'and no orientation listener is attached until tilt is chosen (no sensor cost for joystick players)');
 
+  // The player picks Tilt in Settings before the sensor has reported anything.
   const verdict = await input.requestTilt();
   check(verdict === 'pending', 'a sensor that has not reported yet is "pending", not a hard failure');
   check(input.tiltSupported(), 'the settings toggle stays available while pending');
+  check(input.setMode('tilt', { persist: true }) === false, 'choosing tilt before a reading records the preference but cannot switch yet');
+  check(input.prefersTilt === true && input.mode === 'stick', 'so the joystick keeps driving until the sensor reports');
+  check(store.get('tank.steer') === 'tilt', 'the choice is persisted under tank.steer');
 
   // The whole point: a reading that arrives LATE must still turn tilt on.
   emit(30, 0);
@@ -1060,12 +1069,13 @@ async function checkTilt() {
   await settle(input._beta0 - 20);
   check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
 
-  // ---- tilt must engage with NO gesture whatsoever ----
-  // The orientation listener is attached at construction, so on any platform
-  // without iOS's permission gate the first sensor reading is enough. This
-  // instance never calls requestTilt() — it stands in for a player who has not
-  // touched the screen at all.
+  // ---- a RETURNING tilt player gets tilt with NO gesture whatsoever ----
+  // tank.steer is 'tilt' from the choice above. The orientation listener is then
+  // attached at construction, so on any platform without iOS's permission gate
+  // the first sensor reading is enough. This instance never calls requestTilt()
+  // — it stands in for a player who has not touched the screen at all.
   const auto = new Input(el());
+  check(auto.prefersTilt === true, 'a persisted tilt choice is honoured on the next launch');
   check(auto.mode === 'stick',
     'starts on the stick fallback, so the tank is drivable before the sensor reports');
   check(auto.needsTiltPrompt() === false,
@@ -1073,6 +1083,19 @@ async function checkTilt() {
   emit(24, 0);
   check(auto.tiltReady === true, 'a sensor reading with NO gesture still readies tilt');
   check(auto.mode === 'tilt', 'and tilt takes over without the player tapping anything');
+
+  // ---- the automatic switch is not a preference ----
+  // Switching back to the stick in Settings must stick, and the legacy
+  // `tank.tilt` key — auto-written whenever the sensor happened to engage under
+  // the old default — must never resurrect tilt for a player who never chose it.
+  auto.setMode('stick', { persist: true });
+  check(store.get('tank.steer') === 'stick', 'choosing the joystick persists too');
+  store.clear();
+  store.set('tank.tilt', '1');
+  const legacy = new Input(el());
+  check(legacy.prefersTilt === false, 'the legacy auto-written tank.tilt key is ignored');
+  emit(24, 0);
+  check(legacy.mode === 'stick', 'a sensor reading never hijacks a joystick player');
 
   // ...but where iOS's gate exists, a gesture genuinely is required, and the
   // first tap is reserved for the modal rather than being spent as a shot.

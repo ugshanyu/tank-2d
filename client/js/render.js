@@ -12,10 +12,36 @@ import { OBSTACLES, TOWERS } from '../shared/sim.js';
 // Identity is by TEAM, not by player — in a 2v2 objective match you need to read
 // friend-vs-foe at a glance far more than you need to tell teammates apart.
 // Darkening the surround buys contrast against the arena for free.
-const SURROUND = '#05070b';
+const SURROUND = '#04060f';
 const EMPTY_TOWER_STATE = [];
-const TEAM_COLORS = ['#4fc3f7', '#ff7a5e'];
+// The listing icon's blue and red — saturated, glossy — rather than the old
+// pastel cyan/salmon. Team colour is the single most-read signal in the game.
+const TEAM_COLORS = ['#3d8bff', '#ff4d4d'];
 export const teamColor = (team) => TEAM_COLORS[team & 1];
+
+// Art. The sprites were generated from the listing icon (glossy bevelled
+// blue-vs-red tanks on a neon tile floor) with the icon itself as the style
+// reference, then keyed, cropped and shrunk to what a phone can show
+// (arena zoom ~0.54 x DPR 3). Every draw keeps its procedural fallback: a
+// sprite that fails to load never blanks the arena, that one element just
+// reverts to vector art. Sizes are WORLD px; the collision radii are unchanged.
+const ASSET_DIR = 'assets/';
+const SPRITE_FILES = {
+  hull: ['hull_blue.webp', 'hull_red.webp'],
+  turret: ['turret_blue.webp', 'turret_red.webp'],
+  tower: ['tower_blue.webp', 'tower_red.webp'],
+  tile: ['tile_blue.webp', 'tile_red.webp'],
+  crate: 'crate.webp',
+};
+const HULL_W = 58;                    // treads span; TANK_RADIUS is 26
+// Turret pivot = centre of the octagonal body in image px (measured when the
+// sprites were cut); the barrel runs +x. Scale puts the body at ~28 world px,
+// which lands the muzzle a few px past MUZZLE_OFFSET so shells leave the tip.
+const TURRET_PIVOT = [{ x: 35.2, y: 36.5 }, { x: 33.1, y: 33.4 }];
+const TURRET_SCALE = [0.403, 0.426];
+const TOWER_W = 92;                   // TOWER_RADIUS 44 → octagon 88 + rim
+const CRATE_W = 46;                   // RUNE_RADIUS 22
+const TILE_WORLD = 160;               // one tile image = 2x2 tiles of the 80px grid
 
 // Every fillStyle/strokeStyle assignment re-parses the CSS colour string, and
 // shade()/rgba() were rebuilding those strings ~14 times a frame. There are
@@ -68,6 +94,9 @@ export class Renderer {
     this._aimGrad = this.ctx.createLinearGradient(0, 0, 260, 0);
     this._aimGrad.addColorStop(0, 'rgba(255,255,255,0.42)');
     this._aimGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    this.sprites = { hull: [null, null], turret: [null, null], tower: [null, null],
+                     towerDead: [null, null], tile: [null, null], tilePat: [null, null], crate: null };
+    this._loadSprites();
     this.resize();
     // iOS fires resize ~10x while the URL bar animates; each one would otherwise
     // reallocate a ~5 MB backing store and re-render the whole static layer.
@@ -75,6 +104,30 @@ export class Renderer {
       clearTimeout(this._resizeT);
       this._resizeT = setTimeout(() => this.resize(), 90);
     });
+  }
+
+  _loadSprites() {
+    const load = (file, cb) => {
+      const im = new Image();
+      im.onload = () => cb(im);
+      im.onerror = () => { /* keep the vector fallback for this element */ };
+      im.src = ASSET_DIR + file;
+    };
+    for (const t of [0, 1]) {
+      load(SPRITE_FILES.hull[t], (im) => { this.sprites.hull[t] = im; });
+      load(SPRITE_FILES.turret[t], (im) => { this.sprites.turret[t] = im; });
+      load(SPRITE_FILES.tower[t], (im) => {
+        this.sprites.tower[t] = im;
+        this.sprites.towerDead[t] = deadVariant(im);
+      });
+      load(SPRITE_FILES.tile[t], (im) => {
+        this.sprites.tile[t] = im;
+        // The floor lives in the prerendered static layer — rebuild it once
+        // the tile is here (the pattern itself is built per static context).
+        this._buildStatic();
+      });
+    }
+    load(SPRITE_FILES.crate, (im) => { this.sprites.crate = im; });
   }
 
   resize() {
@@ -123,26 +176,44 @@ export class Renderer {
     // the same colour to the eye. The whole screen read as one dark field with no
     // discernible playfield. A lit centre falling off to dark walls gives the
     // arena a shape before a single sprite is drawn.
-    const floor = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 0, ARENA_W / 2, ARENA_H / 2, 780);
-    floor.addColorStop(0, '#33405a');
-    floor.addColorStop(0.55, '#242c3f');
-    floor.addColorStop(1, '#161c29');
-    g.fillStyle = floor;
-    g.fillRect(0, 0, ARENA_W, ARENA_H);
-
-    // Two grid tiers: the single 0.07-alpha tier was invisible at 0.54 zoom.
-    g.strokeStyle = 'rgba(130,175,235,0.055)';
-    g.lineWidth = 1 / zoom;
-    g.beginPath();
-    for (let x = 0; x <= ARENA_W; x += 80) { g.moveTo(x, 0); g.lineTo(x, ARENA_H); }
-    for (let y = 0; y <= ARENA_H; y += 80) { g.moveTo(0, y); g.lineTo(ARENA_W, y); }
-    g.stroke();
-    g.strokeStyle = 'rgba(130,175,235,0.15)';
-    g.lineWidth = 1.5 / zoom;
-    g.beginPath();
-    for (let x = 0; x <= ARENA_W; x += 160) { g.moveTo(x, 0); g.lineTo(x, ARENA_H); }
-    for (let y = 0; y <= ARENA_H; y += 160) { g.moveTo(0, y); g.lineTo(ARENA_W, y); }
-    g.stroke();
+    const tiles = this.sprites.tile;
+    if (tiles[0] && tiles[1]) {
+      // The icon's floor: glossy bevelled tiles, BLUE on the bottom half (team 0)
+      // and RED on the top, so territory reads from the ground itself. One image
+      // is 2x2 tiles of the 80px grid, so the seams land exactly on the grid
+      // lines and the halfway line (y=640) is a tile edge.
+      const half = ARENA_H / 2;
+      for (const t of [0, 1]) {
+        const pat = g.createPattern(tiles[t], 'repeat');
+        if (!pat) continue;
+        const k = TILE_WORLD / tiles[t].width;
+        pat.setTransform(new DOMMatrix([k, 0, 0, k, 0, 0]));
+        g.fillStyle = pat;
+        g.fillRect(0, t === 0 ? half : 0, ARENA_W, half);
+      }
+      // A lit centre falling off toward the walls, like the icon's key light —
+      // and it keeps the middle (where the runes drop) the brightest spot.
+      const lit = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 60, ARENA_W / 2, ARENA_H / 2, 820);
+      lit.addColorStop(0, 'rgba(255,255,255,0.10)');
+      lit.addColorStop(0.5, 'rgba(255,255,255,0.03)');
+      lit.addColorStop(1, 'rgba(0,0,0,0.18)');
+      g.fillStyle = lit;
+      g.fillRect(0, 0, ARENA_W, ARENA_H);
+    } else {
+      // Vector fallback (also what the first frames show while the tiles load).
+      const floor = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 0, ARENA_W / 2, ARENA_H / 2, 780);
+      floor.addColorStop(0, '#1d2a52');
+      floor.addColorStop(0.55, '#121b3a');
+      floor.addColorStop(1, '#0a1026');
+      g.fillStyle = floor;
+      g.fillRect(0, 0, ARENA_W, ARENA_H);
+      g.strokeStyle = 'rgba(90,150,255,0.10)';
+      g.lineWidth = 1.5 / zoom;
+      g.beginPath();
+      for (let x = 0; x <= ARENA_W; x += 80) { g.moveTo(x, 0); g.lineTo(x, ARENA_H); }
+      for (let y = 0; y <= ARENA_H; y += 80) { g.moveTo(0, y); g.lineTo(ARENA_W, y); }
+      g.stroke();
+    }
 
     // Halfway line — the arena is territorial and never said so.
     g.strokeStyle = 'rgba(255,255,255,0.10)';
@@ -157,17 +228,30 @@ export class Renderer {
     // this is, and the tower itself is unmistakable.
 
     for (const r of OBSTACLES) {
-      // fake top-left key light, consistent across every object in the scene
+      // Bevelled gunmetal blocks (like the icon's turret caps) with a neon edge
+      // in the colour of the half they stand in; the centre block is neutral.
+      const cy = r.y + r.h / 2;
+      const edge = cy < ARENA_H / 2 - 30 ? 'rgba(255,90,90,0.75)'
+        : cy > ARENA_H / 2 + 30 ? 'rgba(90,170,255,0.75)' : 'rgba(200,220,255,0.7)';
+      // drop shadow — lifts the block off the floor
+      g.fillStyle = 'rgba(0,0,0,0.45)';
+      g.fillRect(r.x + 3, r.y + 5, r.w, r.h);
       const og = g.createLinearGradient(r.x, r.y, r.x, r.y + r.h);
-      og.addColorStop(0, '#39455c');
-      og.addColorStop(1, '#1b2231');
+      og.addColorStop(0, '#5a6478');
+      og.addColorStop(0.5, '#3a4356');
+      og.addColorStop(1, '#232a3a');
       g.fillStyle = og;
       g.fillRect(r.x, r.y, r.w, r.h);
-      g.strokeStyle = '#4a6187';
-      g.lineWidth = 2.5;
-      g.strokeRect(r.x, r.y, r.w, r.h);
-      g.fillStyle = 'rgba(190,225,255,0.18)';
+      // bevel: light top/left, dark bottom/right
+      g.fillStyle = 'rgba(255,255,255,0.22)';
       g.fillRect(r.x, r.y, r.w, 3);
+      g.fillRect(r.x, r.y, 3, r.h);
+      g.fillStyle = 'rgba(0,0,0,0.35)';
+      g.fillRect(r.x, r.y + r.h - 3, r.w, 3);
+      g.fillRect(r.x + r.w - 3, r.y, 3, r.h);
+      g.strokeStyle = edge;
+      g.lineWidth = 2;
+      g.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
     }
 
     // Vignette: pulls the eye to the middle and darkens the walls.
@@ -181,7 +265,7 @@ export class Renderer {
     g.strokeStyle = 'rgba(79,195,247,0.10)';
     g.lineWidth = 22;
     g.strokeRect(0, 0, ARENA_W, ARENA_H);
-    g.strokeStyle = '#3f6da0';
+    g.strokeStyle = '#2b63d9';
     g.lineWidth = 5;
     g.strokeRect(0, 0, ARENA_W, ARENA_H);
     g.strokeStyle = 'rgba(190,225,255,0.5)';
@@ -385,16 +469,33 @@ export class Renderer {
       const col = POWER_COLORS[r.kind] || '#ffd76e';
       ctx.save();
       ctx.translate(r.x, r.y);
-      ctx.globalAlpha = 0.22;
+      ctx.globalAlpha = 0.28;
       ctx.fillStyle = col;
-      ctx.beginPath(); ctx.arc(0, 0, 30 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, 32 * pulse, 0, Math.PI * 2); ctx.fill();
       ctx.globalAlpha = 1;
-      ctx.fillStyle = 'rgba(6,10,18,0.55)';
-      ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.stroke();
-      this._powerIcon(r.kind, col);
+      const crate = this.sprites.crate;
+      if (crate) {
+        // The crate's core is white so ONE sprite serves every power: tint it
+        // additively, then the glyph on top says which power it is.
+        const w = CRATE_W * pulse;
+        ctx.drawImage(crate, -w / 2, -w / 2, w, w);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(0, 0, 11 * pulse, 0, Math.PI * 2); ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#06101f';
+        ctx.strokeStyle = '#06101f';
+        ctx.save(); ctx.scale(0.85, 0.85); this._powerIcon(r.kind, '#06101f'); ctx.restore();
+      } else {
+        ctx.fillStyle = 'rgba(6,10,18,0.55)';
+        ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(0, 0, 22 * pulse, 0, Math.PI * 2); ctx.stroke();
+        this._powerIcon(r.kind, col);
+      }
       ctx.restore();
     }
 
@@ -466,10 +567,10 @@ export class Renderer {
       const tx = bx - b.vx * 0.045, ty = by - b.vy * 0.045;
       const R = b.isPower ? shellR * 1.9 : shellR;
       ctx.strokeStyle = b.isPower ? 'rgba(255,120,220,0.6)'
-        : mine ? 'rgba(255,230,150,0.45)' : 'rgba(255,150,110,0.45)';
+        : mine ? 'rgba(255,190,60,0.55)' : 'rgba(255,110,50,0.55)';
       ctx.lineWidth = b.isPower ? 6 : 3.5;
       ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by); ctx.stroke();
-      ctx.fillStyle = b.isPower ? '#ff9bf0' : mine ? '#ffe796' : '#ff9d6e';
+      ctx.fillStyle = b.isPower ? '#ff9bf0' : mine ? '#fff3b0' : '#ffb070';
       ctx.beginPath(); ctx.arc(bx, by, R, 0, Math.PI * 2); ctx.fill();
       if (b.isPower) {
         ctx.fillStyle = '#ffffff';
@@ -484,6 +585,39 @@ export class Renderer {
     // ---- screen-space overlay pass ----
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     if (state.joy) this._joystick(state.joy, state.joyMax || 78);
+    else if (state.joyHome) this._joystickHome(state.joyHome, state.joyMax || 52);
+  }
+
+  // Resting base. The stick floats (it spawns under the thumb), but a control
+  // with no visible presence is a control a first-time player never finds —
+  // "drag the left side" is not a thing anyone tries unprompted. Deliberately
+  // faint: an invitation, not chrome, and it disappears the moment a drive starts.
+  _joystickHome(home, max) {
+    const { ctx } = this;
+    ctx.save();
+    ctx.translate(home.x, home.y);
+    ctx.fillStyle = 'rgba(40,110,220,0.10)';
+    ctx.beginPath(); ctx.arc(0, 0, max, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,190,255,0.35)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // four direction ticks — reads as "this moves in any direction"
+    ctx.strokeStyle = 'rgba(160,215,255,0.55)';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const a = (i * Math.PI) / 2;
+      ctx.moveTo(Math.cos(a) * (max - 13), Math.sin(a) * (max - 13));
+      ctx.lineTo(Math.cos(a) * (max - 5), Math.sin(a) * (max - 5));
+    }
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(160,215,255,0.22)';
+    ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(160,215,255,0.45)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // The joystick had NO visual representation at all — the entire fallback control
@@ -496,16 +630,16 @@ export class Renderer {
     const s = d > max ? max / d : 1;
     ctx.save();
     ctx.translate(joy.cx, joy.cy);
-    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.fillStyle = 'rgba(40,110,220,0.16)';
+    ctx.beginPath(); ctx.arc(0, 0, max, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,190,255,0.5)';
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(0, 0, max, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.05)';
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.32)';
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(160,215,255,0.5)';
     ctx.beginPath(); ctx.arc(dx * s, dy * s, 26, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(dx * s, dy * s, 26, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(210,238,255,0.85)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -523,53 +657,84 @@ export class Renderer {
     ctx.save();
     ctx.translate(tw.x, tw.y);
 
-    octagon(ctx, R);
-    ctx.fillStyle = dead ? '#171b24' : pal.towerFill;
-    ctx.fill();
-    ctx.strokeStyle = dead ? '#2a3242' : color;
-    ctx.lineWidth = 3;
-    ctx.stroke();
+    const tImg = dead ? this.sprites.towerDead[tw.team & 1] : this.sprites.tower[tw.team & 1];
+    if (tImg) {
+      const w = TOWER_W, h = TOWER_W * tImg.height / tImg.width;
+      ctx.drawImage(tImg, -w / 2, -h / 2, w, h);
+      if (dead) { ctx.restore(); return; }
+      // Barrel: the sprite has none, and a tower that shoots you every 1.1 s
+      // must visibly hold a weapon. Gunmetal with the team's edge light.
+      if (aimAt !== null) {
+        ctx.save();
+        ctx.rotate(aimAt);
+        ctx.fillStyle = '#2a3142';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.fillRect(R * 0.35 - recoil, -6, 38, 12);
+        ctx.strokeRect(R * 0.35 - recoil, -6, 38, 12);
+        ctx.fillStyle = '#5a6478';
+        ctx.fillRect(R * 0.35 + 30 - recoil, -7, 8, 14);
+        ctx.restore();
+      }
+      // The sprite's core already glows; pulse an additive halo over it, and
+      // below a quarter health flash it red as the panic tell.
+      const crit = f <= 0.25;
+      const pulse = 1 + 0.12 * Math.sin(now / (crit ? 150 : 420));
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = crit ? (Math.sin(now / 150) > 0 ? 0.9 : 0.3) : 0.45;
+      ctx.fillStyle = crit ? '#ff3030' : color;
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.22 * pulse, 0, Math.PI * 2); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+    } else {
+      octagon(ctx, R);
+      ctx.fillStyle = dead ? '#171b24' : pal.towerFill;
+      ctx.fill();
+      ctx.strokeStyle = dead ? '#2a3242' : color;
+      ctx.lineWidth = 3;
+      ctx.stroke();
 
-    if (dead) {
-      ctx.strokeStyle = '#2a3242';
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.moveTo(-R * 0.5, -R * 0.3); ctx.lineTo(-R * 0.1, R * 0.35); ctx.lineTo(R * 0.45, -R * 0.15);
-      ctx.moveTo(-R * 0.2, -R * 0.55); ctx.lineTo(R * 0.2, R * 0.5);
+      if (dead) {
+        ctx.strokeStyle = '#2a3242';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(-R * 0.5, -R * 0.3); ctx.lineTo(-R * 0.1, R * 0.35); ctx.lineTo(R * 0.45, -R * 0.15);
+        ctx.moveTo(-R * 0.2, -R * 0.55); ctx.lineTo(R * 0.2, R * 0.5);
+        ctx.stroke();
+        ctx.restore();
+        return;
+      }
+
+      // Barrel. It is an auto-turret that shoots you every 1.1s and it had no
+      // visible weapon at all — you were killed by a thing that never moved.
+      if (aimAt !== null) {
+        ctx.save();
+        ctx.rotate(aimAt);
+        ctx.fillStyle = shade(color, -0.45);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.fillRect(R * 0.4 - recoil, -5.5, 34, 11);
+        ctx.strokeRect(R * 0.4 - recoil, -5.5, 34, 11);
+        ctx.restore();
+      }
+
+      // Slowly rotating inner ring: a static win condition reads as scenery.
+      ctx.save();
+      ctx.rotate(spin);
+      octagon(ctx, R * 0.55);
+      ctx.fillStyle = pal.towerCore;
+      ctx.fill();
+      ctx.strokeStyle = pal.towerRim;
+      ctx.lineWidth = 2;
       ctx.stroke();
       ctx.restore();
-      return;
+
+      // Core pulses; below a quarter health it flashes red as a panic tell.
+      const crit = f <= 0.25;
+      const pulse = 1 + 0.10 * Math.sin(now / (crit ? 150 : 420));
+      ctx.fillStyle = crit ? (Math.sin(now / 150) > 0 ? '#ff4d4d' : color) : color;
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.2 * pulse, 0, Math.PI * 2); ctx.fill();
     }
-
-    // Barrel. It is an auto-turret that shoots you every 1.1s and it had no
-    // visible weapon at all — you were killed by a thing that never moved.
-    if (aimAt !== null) {
-      ctx.save();
-      ctx.rotate(aimAt);
-      ctx.fillStyle = shade(color, -0.45);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.fillRect(R * 0.4 - recoil, -5.5, 34, 11);
-      ctx.strokeRect(R * 0.4 - recoil, -5.5, 34, 11);
-      ctx.restore();
-    }
-
-    // Slowly rotating inner ring: a static win condition reads as scenery.
-    ctx.save();
-    ctx.rotate(spin);
-    octagon(ctx, R * 0.55);
-    ctx.fillStyle = pal.towerCore;
-    ctx.fill();
-    ctx.strokeStyle = pal.towerRim;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.restore();
-
-    // Core pulses; below a quarter health it flashes red as a panic tell.
-    const crit = f <= 0.25;
-    const pulse = 1 + 0.10 * Math.sin(now / (crit ? 150 : 420));
-    ctx.fillStyle = crit ? (Math.sin(now / 150) > 0 ? '#ff4d4d' : color) : color;
-    ctx.beginPath(); ctx.arc(0, 0, R * 0.2 * pulse, 0, Math.PI * 2); ctx.fill();
 
     // Damage states — smoke from the tower itself, so its condition is readable
     // from across the arena without reading the bar.
@@ -621,38 +786,54 @@ export class Renderer {
     ctx.ellipse(3, 5, R * 1.02, R * 0.9, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.save();
-    ctx.rotate(hull);
-    // Treads: inset along the hull axis and thinner. Spanning the full 52px width
-    // made them the OUTERMOST element, so at 28 screen px every tank read as a
-    // black slab with a coloured dot in it rather than as a vehicle.
-    ctx.fillStyle = '#07090d';
-    ctx.fillRect(-R + 5, -R + 1, R * 2 - 10, 7);
-    ctx.fillRect(-R + 5, R - 8, R * 2 - 10, 7);
-    // hull — build the rounded path once, then fill AND stroke it
-    roundRect(ctx, -R + 2, -R + 8, R * 2 - 4, R * 2 - 16, 6);
-    ctx.fillStyle = this._hullGrad[teamIdx & 1];
-    ctx.fill();
-    // dark keyline first, then the bright rim: the outline has to be the dominant
-    // read at this size, and a 2.5px stroke resolves to 1.35 screen px.
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 4.5;
-    ctx.stroke();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2.6;
-    ctx.stroke();
-    ctx.restore();
+    const hImg = this.sprites.hull[teamIdx & 1], tImg = this.sprites.turret[teamIdx & 1];
+    if (hImg && tImg) {
+      ctx.save();
+      ctx.rotate(hull);
+      const hw = HULL_W, hh = HULL_W * hImg.height / hImg.width;
+      ctx.drawImage(hImg, -hw / 2, -hh / 2, hw, hh);
+      ctx.restore();
+      // turret on its own pivot; the recoil kicks the whole turret back along
+      // the barrel and eases out over 120 ms
+      ctx.save();
+      ctx.rotate(turret);
+      const s = TURRET_SCALE[teamIdx & 1], pv = TURRET_PIVOT[teamIdx & 1];
+      ctx.drawImage(tImg, -pv.x * s - recoil, -pv.y * s, tImg.width * s, tImg.height * s);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.rotate(hull);
+      // Treads: inset along the hull axis and thinner. Spanning the full 52px width
+      // made them the OUTERMOST element, so at 28 screen px every tank read as a
+      // black slab with a coloured dot in it rather than as a vehicle.
+      ctx.fillStyle = '#07090d';
+      ctx.fillRect(-R + 5, -R + 1, R * 2 - 10, 7);
+      ctx.fillRect(-R + 5, R - 8, R * 2 - 10, 7);
+      // hull — build the rounded path once, then fill AND stroke it
+      roundRect(ctx, -R + 2, -R + 8, R * 2 - 4, R * 2 - 16, 6);
+      ctx.fillStyle = this._hullGrad[teamIdx & 1];
+      ctx.fill();
+      // dark keyline first, then the bright rim: the outline has to be the dominant
+      // read at this size, and a 2.5px stroke resolves to 1.35 screen px.
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 4.5;
+      ctx.stroke();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+      ctx.restore();
 
-    // turret + barrel, with a recoil kick that eases back over 120 ms
-    ctx.save();
-    ctx.rotate(turret);
-    ctx.fillStyle = pal.turret;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.fillRect(10 - recoil, -4.5, 30, 9);
-    ctx.strokeRect(10 - recoil, -4.5, 30, 9);
-    ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.restore();
+      // turret + barrel, with a recoil kick that eases back over 120 ms
+      ctx.save();
+      ctx.rotate(turret);
+      ctx.fillStyle = pal.turret;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.fillRect(10 - recoil, -4.5, 30, 9);
+      ctx.strokeRect(10 - recoil, -4.5, 30, 9);
+      ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
 
     if (isMe) {
       // No ring around the player's own tank — the encircling reload arc + pips
@@ -865,6 +1046,24 @@ export class Renderer {
     ctx.fill();
     ctx.restore();
   }
+}
+
+// A destroyed tower is the same sprite, drained: desaturate, then darken, with
+// the original's alpha restored so the fills never bleed outside the octagon.
+function deadVariant(img) {
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  g.globalCompositeOperation = 'saturation';
+  g.fillStyle = '#808080';
+  g.fillRect(0, 0, c.width, c.height);
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(img, 0, 0);
+  g.globalCompositeOperation = 'source-atop';
+  g.fillStyle = 'rgba(0,0,0,0.6)';
+  g.fillRect(0, 0, c.width, c.height);
+  return c;
 }
 
 function roundRect(ctx, x, y, w, h, r) {
