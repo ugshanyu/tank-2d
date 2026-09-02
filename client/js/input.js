@@ -1,7 +1,9 @@
-// Input: virtual joystick (left side of the screen) to drive + touch-to-aim/shoot
-// on touch devices, WASD/arrows + mouse on desktop. Tilt-to-move (device
-// orientation) is an opt-in alternative chosen in Settings. Pointer Events
-// throughout.
+// Input: tilt-to-move (device orientation) with touch-to-aim/shoot on phones.
+// The virtual joystick is the FALLBACK — it drives whenever tilt is unavailable,
+// denied, or not yet reporting — and a choice in Settings. In joystick mode the
+// FIRST finger is the stick wherever it lands (left or right, whichever hand is
+// free) and the second finger aims and shoots. WASD/arrows + mouse on desktop.
+// Pointer Events throughout.
 
 const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
 const JOY_MAX = 52;          // px of drag for full joystick deflection. 78 was
@@ -30,13 +32,12 @@ export class Input {
     this.mode = 'stick';               // 'tilt' | 'stick' (stick also covers kbd)
     this.isTouch = (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
       || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
-    // The joystick is the default on every device. Tilt is a real option that
-    // some players love, but as the DEFAULT it cost every phone player an OS
-    // permission prompt before their first shot, a re-level whenever they
-    // shifted in their seat, and a scheme that cannot be played lying down or
-    // on a bus. It is now an explicit choice in Settings — and, once chosen,
-    // it sticks across launches.
-    this.prefersTilt = false;
+    // Tilt is the way to play on a phone: the whole arena is on screen and both
+    // thumbs stay free to aim. The joystick is never shown unless it is needed —
+    // it takes over when motion access is denied or the device has no sensor —
+    // or unless the player picks it in Settings, and a choice sticks across
+    // launches. Nothing about steering is written to storage until they choose.
+    this.prefersTilt = this.isTouch;
     // Default posture: 'auto' — neutral is sampled from HOWEVER the player is
     // holding the phone when tilt engages, so their current angle IS level. The
     // named presets remain as explicit choices in settings and, once chosen,
@@ -45,10 +46,11 @@ export class Input {
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
     try {
       // Only an EXPLICIT choice is remembered (setMode's `persist`). The legacy
-      // `tank.tilt` key was written whenever the sensor happened to engage under
-      // the old tilt-by-default, so it says nothing about what the player wanted
-      // and is deliberately ignored.
-      this.prefersTilt = localStorage.getItem('tank.steer') === 'tilt';
+      // `tank.tilt` key was auto-written whenever the sensor happened to engage,
+      // so it says nothing about what the player wanted and is ignored.
+      const steer = localStorage.getItem('tank.steer');
+      if (steer === 'tilt') this.prefersTilt = true;
+      else if (steer === 'stick') this.prefersTilt = false;
       const pose = localStorage.getItem('tank.tiltPose');
       // A stored 'custom' is only meaningful with the angle that went with it;
       // without one, applyTiltPreset would fail and we'd fall back to sampling.
@@ -343,8 +345,11 @@ export class Input {
       // unintended shot — and if the modal swallowed the pointerup, a stuck one.
       if (this.suppressNextPointer) { this.suppressNextPointer = false; return; }
       try { c.setPointerCapture(e.pointerId); } catch { /* pointer already gone (or synthetic) */ }
-      const useStickZone = this.mode !== 'tilt';
-      if (useStickZone && e.pointerType !== 'mouse' && !this.joy && e.clientX < window.innerWidth * 0.45) {
+      // Joystick mode: the first finger down IS the stick, on either side of the
+      // screen — no zone. A fixed left-hand zone assumed a right-handed player
+      // and made a left thumb on the right half fire instead of drive. Every
+      // later finger aims and shoots. (Tilt mode: every touch aims and shoots.)
+      if (this.mode !== 'tilt' && e.pointerType !== 'mouse' && !this.joy) {
         this.joy = { pointerId: e.pointerId, cx: e.clientX, cy: e.clientY, dx: 0, dy: 0 };
         return;
       }

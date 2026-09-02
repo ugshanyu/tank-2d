@@ -585,43 +585,8 @@ export class Renderer {
     // ---- screen-space overlay pass ----
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     if (state.joy) this._joystick(state.joy, state.joyMax || 78);
-    else if (state.joyHome) this._joystickHome(state.joyHome, state.joyMax || 52);
   }
 
-  // Resting base. The stick floats (it spawns under the thumb), but a control
-  // with no visible presence is a control a first-time player never finds —
-  // "drag the left side" is not a thing anyone tries unprompted. Deliberately
-  // faint: an invitation, not chrome, and it disappears the moment a drive starts.
-  _joystickHome(home, max) {
-    const { ctx } = this;
-    ctx.save();
-    ctx.translate(home.x, home.y);
-    ctx.fillStyle = 'rgba(40,110,220,0.10)';
-    ctx.beginPath(); ctx.arc(0, 0, max, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(120,190,255,0.35)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    // four direction ticks — reads as "this moves in any direction"
-    ctx.strokeStyle = 'rgba(160,215,255,0.55)';
-    ctx.lineWidth = 2.5;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    for (let i = 0; i < 4; i++) {
-      const a = (i * Math.PI) / 2;
-      ctx.moveTo(Math.cos(a) * (max - 13), Math.sin(a) * (max - 13));
-      ctx.lineTo(Math.cos(a) * (max - 5), Math.sin(a) * (max - 5));
-    }
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(160,215,255,0.22)';
-    ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(160,215,255,0.45)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // The joystick had NO visual representation at all — the entire fallback control
-  // scheme was an invisible surface with no affordance and no deflection feedback.
   _joystick(joy, max) {
     const { ctx } = this;
     const dx = clamp(joy.dx, -max, max);

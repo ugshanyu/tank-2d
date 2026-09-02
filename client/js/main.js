@@ -45,21 +45,6 @@ function placeGear() {
 placeGear();
 window.addEventListener('resize', placeGear);
 
-// Resting joystick base: a visible affordance at the bottom-left so a first-time
-// player sees the control before touching anything. The LIVE stick still spawns
-// wherever the thumb lands in the left zone — this is an invitation, not a fixed
-// hit target, so a thumb that rests a little higher or lower still just works.
-const joyHome = { x: 0, y: 0 };
-function placeJoyHome() {
-  const cs = getComputedStyle(document.documentElement);
-  const sal = parseFloat(cs.getPropertyValue('--sal')) || 0;
-  const sab = parseFloat(cs.getPropertyValue('--sab')) || 0;
-  joyHome.x = sal + 96;
-  joyHome.y = window.innerHeight - sab - 118;
-}
-placeJoyHome();
-window.addEventListener('resize', placeJoyHome);
-
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
 
@@ -128,8 +113,8 @@ async function acquireWakeLock() {
 // There is no PLAY button any more — the game starts on load. But iOS 13+ only
 // hands out motion access (and fullscreen, and a wake lock) from inside a user
 // gesture, so those are deferred to the player's FIRST touch instead of a
-// dedicated tap-to-start screen. The joystick is the default, so the game is
-// playable from frame one either way.
+// dedicated tap-to-start screen. Until then the joystick fallback drives, so
+// the game is playable from frame one either way.
 function armFirstGesture() {
   let done = false;
   const fire = async () => {
@@ -139,11 +124,11 @@ function armFirstGesture() {
     window.removeEventListener('click', fire, true);
 
     sfx.unlock();   // AudioContext can only start inside a gesture
-    // The joystick is the default, so this tap is an ordinary shot. Only a player
-    // who has CHOSEN tilt pays the iOS motion prompt here — for them it is the
-    // user gesture the OS insists on. Swallow the tap only when it will genuinely
-    // open that modal: doing it unconditionally ate the first shot on Android and
-    // in WebViews, where no prompt ever appears.
+    // Tilt is the phone default, so this tap is the user gesture iOS insists on
+    // for motion access. A player on the joystick (sensor denied or absent, or
+    // chose it in Settings) just gets an ordinary shot. Swallow the tap only when
+    // it will genuinely open the modal: doing it unconditionally ate the first
+    // shot on Android and in WebViews, where no prompt ever appears.
     if (input.prefersTilt) {
       input.suppressNextPointer = input.needsTiltPrompt();
       const tilt = await input.requestTilt();
@@ -153,13 +138,13 @@ function armFirstGesture() {
         // iOS remembers a refusal per origin, and a WebView whose host app does not
         // implement the motion-permission delegate reports 'denied' with no prompt
         // at all — so point at the retry rather than implying it is permanent.
-        toast('Motion blocked — joystick on the left. Retry in ⚙ Settings', 3400);
+        toast('Motion blocked — first finger drives, second shoots. Retry in ⚙ Settings', 3400);
       } else if (tilt === 'unavailable') {
-        toast('No motion sensor — drag the left side to drive', 3000);
+        toast('No motion sensor — first finger drives, second shoots', 3000);
       } else if (tilt === 'pending') {
         // The sensor has not reported yet. It still might; onTiltReady switches us
         // over if it does, so do not tell the player tilt is gone.
-        toast('Drag the left side to drive', 2600);
+        toast('First finger drives, second finger shoots', 2600);
       }
       // The permission modal can swallow pointerup, leaving a phantom held touch.
       input.clearTouches();
@@ -173,16 +158,17 @@ function armFirstGesture() {
   window.addEventListener('click', fire, true);
 }
 
-// ASK ON OPEN — for players who have CHOSEN tilt. iOS 13+ refuses
-// DeviceOrientation to any requestPermission() that is not inside a user
-// gesture, so a page-load prompt is impossible; without this, a returning tilt
-// player would sit on the joystick until they happened to touch the playfield.
+// ASK ON OPEN. iOS 13+ refuses DeviceOrientation to any requestPermission() that
+// is not inside a user gesture, so a page-load prompt is impossible — but waiting
+// for the player to happen to touch the playfield meant tilt engaged whenever,
+// and looked like the game had defaulted to the joystick. This puts one
+// deliberate ask in front of them the moment the game opens.
 //
-// Shown ONLY when it would do something: a touch device whose player prefers
-// tilt, where the iOS gate genuinely exists and tilt has not already engaged by
-// itself. Joystick players (the default) never see it. The 600 ms grace keeps it
-// off Android and every WebView without the gate — those attach at startup and
-// are usually already steering by then.
+// Shown ONLY when it would do something: a touch device that prefers tilt, where
+// the iOS gate genuinely exists and tilt has not already engaged by itself.
+// Players who chose the joystick never see it. The 600 ms grace keeps it off
+// Android and every WebView without the gate — those attach at startup and are
+// usually already steering by then.
 function maybeAskMotion() {
   if (!input.isTouch || !input.prefersTilt) return;
   setTimeout(() => {
@@ -200,7 +186,7 @@ async function askMotion() {
   const verdict = await input.requestTilt();
   input.clearTouches();
   if (verdict === 'granted' || input.tiltReady) toast('Tilt to drive', 2000);
-  else if (verdict === 'denied') toast('Motion blocked — joystick on the left. Retry in ⚙', 3400);
+  else if (verdict === 'denied') toast('Motion blocked — first finger drives, second shoots. Retry in ⚙', 3400);
   syncSheet();
 }
 
@@ -327,10 +313,15 @@ function showIntro() {
   } else {
     // On a phone tilt is the default, but permission is not granted until the first
     // touch — so key the copy off the PREFERENCE, not the mode we're in right now.
-    EL.introDrive.textContent = (input.mode === 'tilt' || input.prefersTilt)
+    // Joystick mode is two-finger by design: the first finger IS the stick,
+    // wherever it lands, so "touch to shoot" has to say "second finger".
+    const tilt = input.mode === 'tilt' || input.prefersTilt;
+    EL.introDrive.textContent = tilt
       ? 'Tilt your phone to drive.'
-      : 'Drag the left side to drive.';
-    EL.introAim.textContent = 'Touch the right side to aim and shoot.';
+      : 'First finger: drag to drive — the joystick appears under it, left or right.';
+    EL.introAim.textContent = tilt
+      ? 'Touch anywhere to aim and shoot.'
+      : 'Second finger: touch to aim and shoot.';
   }
   EL.intro.classList.add('on');
 }
@@ -479,7 +470,7 @@ function startNet(resolveUrl) {
   const drawState = {
     me: null, meId: 0, meName: '', mePos: null, aimAngle: 0, myTeam: 0,
     towerHp: null, others: null, bullets: null, effects: null, joy: null, joyMax: 0,
-    joyHome: null, dt: 1 / 60, lastFireAt: -1e9, reload: 1,
+    dt: 1 / 60, lastFireAt: -1e9, reload: 1,
   };
 
   function loop(now) {
@@ -557,7 +548,6 @@ function startNet(resolveUrl) {
     drawState.effects = game.effects;
     drawState.joy = input.joy;
     drawState.joyMax = input.joyMax;
-    drawState.joyHome = (input.isTouch && input.mode !== 'tilt' && !input.joy) ? joyHome : null;
     drawState.dt = dt || 1 / 60;
     drawState.lastFireAt = game.lastFireAt;
     drawState.reload = game.reloadFraction();
@@ -784,7 +774,6 @@ function startSoloPractice() {
       effects,
       joy: input.joy,
       joyMax: input.joyMax,
-      joyHome: (input.isTouch && input.mode !== 'tilt' && !input.joy) ? joyHome : null,
       showAim: input.hasAim,
       ammo: MAG_SIZE,
       reloading: false,
