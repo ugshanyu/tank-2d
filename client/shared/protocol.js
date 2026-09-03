@@ -17,9 +17,12 @@ export const TANK_RADIUS = 26;
 // 186 ms to coast to a stop — that ramp on both ends is exactly the "driving on
 // ice" complaint. 81 ms to full speed reads as instant without feeling twitchy,
 // and a much harder brake means releasing the stick stops you in ~50 ms/5 px.
-export const TANK_MAX_SPEED = 205;      // px/s (~3.5 s to cross the arena)
-export const TANK_ACCEL = 2600;         // px/s^2 toward target velocity
-export const TANK_BRAKE = 4200;         // px/s^2 when releasing input (asymmetric)
+export const TANK_MAX_SPEED = 265;      // px/s (~2.7 s to cross the arena)
+export const TANK_ACCEL = 3350;         // px/s^2 toward target velocity
+export const TANK_BRAKE = 5400;         // px/s^2 when releasing input (asymmetric)
+// Accel and brake are scaled WITH the top speed on purpose. Raising only the
+// ceiling buys a longer ramp, not a faster tank: the ~79 ms to full speed and
+// the ~50 ms stop are the numbers that actually read as responsive.
 export const HULL_TURN_RATE = 16;       // rad/s hull visually turns toward velocity
 export const MAX_HP = 100;
 
@@ -45,12 +48,15 @@ export const BULLET_DAMAGE = 34;        // 3 shells to kill. Raised from 28 (4 s
                                         // stopped resolving. Three keeps a fight
                                         // decidable without making a shot cheap.
 export const OWNER_GRACE = 0.22;        // s a bullet cannot hit its owner (bounce-backs can)
-export const FIRE_COOLDOWN = 1.0;       // s between shots. One shot per second makes
-                                        // every trigger pull a decision you commit to
-                                        // rather than a stream you hose around — but
-                                        // it is a HARD balance lever: see TOWER_HP and
-                                        // MAG_SIZE below, both of which were sized
-                                        // against the old ~6 shots/s.
+export const FIRE_COOLDOWN = 0.7;       // s between shots. Still slow enough that a
+                                        // trigger pull is a decision you commit to,
+                                        // not a stream you hose around, but 1.0 s made
+                                        // a miss cost a full second of standing there
+                                        // — punishing on a map you can now cross in
+                                        // 2.7 s. At 3 shells to kill this puts a clean
+                                        // duel at ~1.4 s. It is a HARD balance lever:
+                                        // see TOWER_HP and MAG_SIZE, both sized
+                                        // against the shot rate.
 // Magazine: five fast shots, then a real reload. The pause is what gives the
 // volley a shape — without it, held fire is an undifferentiated stream.
 export const MAG_SIZE = 5;
@@ -129,11 +135,12 @@ export const SPEED_MULT = 1.55;         // 205 -> ~318 px/s
 export const RUNE_MARGIN = 60;
 export const RUNE_CLEARANCE = 60;       // TANK_RADIUS + RUNE_RADIUS + 12
 export const RUNE_TOWER_GAP = 190;
-// The old fixed gates — the gaps flanking the centre box on the halfway line.
+// A known-good mirrored pair on the halfway line, out in the two side lanes.
 // Kept as the fallback if a random pick fails every attempt (it cannot on this
 // map; belt and braces for a future layout) and as the pin the deterministic
-// smoke phase uses via RUNE_SPOTS_FORCE.
-export const RUNE_SPOTS = [{ x: 220, y: ARENA_H / 2 }, { x: 500, y: ARENA_H / 2 }];
+// smoke phase uses via RUNE_SPOTS_FORCE. Must satisfy runeSpotClear() — the
+// old pair sat at x 220/500, which the wider centre block now covers.
+export const RUNE_SPOTS = [{ x: 120, y: ARENA_H / 2 }, { x: 600, y: ARENA_H / 2 }];
 
 // ---- Teams ----
 export const TEAM_COUNT = 2;            // 0 = BLUE (bottom half), 1 = RED (top half)
@@ -169,7 +176,7 @@ export const INTERP_DELAY_MS = 100;     // remote entities rendered this far in 
 // a server on a different version answers `stale` and closes, and the page
 // reloads itself — a cached client must never decode a layout it does not know
 // (the symptom is tanks teleporting around the arena, not an error).
-export const WIRE_VERSION = 2;
+export const WIRE_VERSION = 3;
 export const MSG = {
   // client -> server
   INPUT: 1,

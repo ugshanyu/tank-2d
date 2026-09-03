@@ -432,6 +432,23 @@ async function checkNoRevives(port) {
   // whether bots kill each other inside any given 15s is a coin flip (3-shell
   // kills, 1s cooldown, 5s respawns, shields), and "0 deaths observed" made the
   // whole check vacuous — it failed intermittently for that reason alone.
+  // The probe has to be able to FIGHT on the real map: driving straight at an
+  // enemy and holding the trigger works only on an empty field. With cover in
+  // the middle it grinds into the block and feeds it shells, and the phase then
+  // fails for a reason that has nothing to do with the contract under test.
+  const { OBSTACLES } = await import('../client/shared/sim.js');
+  const losClear = (x1, y1, x2, y2, pad) => {
+    const d = Math.hypot(x2 - x1, y2 - y1);
+    const steps = Math.max(2, Math.ceil(d / 12));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t;
+      for (const r of OBSTACLES) {
+        if (x > r.x - pad && x < r.x + r.w + pad && y > r.y - pad && y < r.y + r.h + pad) return false;
+      }
+    }
+    return true;
+  };
+  let strafeDir = 1, strafeFlipAt = 0;
   const minMs = 12000, maxMs = 40000;
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs && (Date.now() - t0 < minMs || deathsSeen === 0)) {
@@ -448,12 +465,23 @@ async function checkNoRevives(port) {
         if (d < best) { best = d; tx = st.x; ty = st.y; }
       }
       const aim = best < Infinity ? Math.atan2(ty - game.me.y, tx - game.me.x) : 0;
-      const drive = best < Infinity && best > 220;
-      game.tick({
-        moveX: drive ? Math.cos(aim) : 0,
-        moveY: drive ? Math.sin(aim) : 0,
-        firing: best < Infinity,
-      }, aim);
+      // Only shoot when the shell can actually get there — shells die on the
+      // first wall they touch, so blind fire just empties the magazine into
+      // the centre block.
+      const clear = best < Infinity && losClear(game.me.x, game.me.y, tx, ty, 8);
+      let mx = 0, my = 0;
+      if (best < Infinity) {
+        const ax = Math.cos(aim), ay = Math.sin(aim);
+        if (!clear) {
+          // Wall in the way: slide along it to find an angle instead of pushing
+          // into it. The direction flips periodically so a bad guess costs a
+          // second or two rather than the whole window.
+          if (Date.now() > strafeFlipAt) { strafeDir = -strafeDir; strafeFlipAt = Date.now() + 1500; }
+          mx = -ay * strafeDir + ax * 0.35;
+          my = ax * strafeDir + ay * 0.35;
+        } else if (best > 220) { mx = ax; my = ay; }
+      }
+      game.tick({ moveX: mx, moveY: my, firing: clear }, aim);
     }
     const renderMs = game.frame(DT);
     for (const st of game.remoteStates(renderMs, DT)) {
@@ -650,7 +678,7 @@ async function checkRuneSpots() {
   check(!runeSpotClear(OBSTACLES[0].x + OBSTACLES[0].w / 2, OBSTACLES[0].y + OBSTACLES[0].h / 2),
     'a spot inside the centre block is rejected');
   check(!runeSpotClear(TOWERS[0].x, TOWERS[0].y + 100), 'a spot right under a tower is rejected');
-  check(runeSpotClear(220, 760), 'the left lane below the halfway line is legal');
+  check(runeSpotClear(110, 760), 'the left lane below the halfway line is legal');
   // deterministic rand -> deterministic spot; forced spots pass straight through
   const [d1] = pickRuneSpots(() => 0.5); const [d2] = pickRuneSpots(() => 0.5);
   check(d1.x === d2.x && d1.y === d2.y, 'an injected rand makes the pick reproducible');
@@ -687,8 +715,9 @@ async function checkPowers() {
   check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
 
   // ---- wave 1: DOUBLE SHOT at BOTH spots ----
-  // Spots are pinned to the old gates ON the halfway line (RUNE_SPOTS_FORCE), in
-  // the gaps flanking the centre box, so every lane below is known-clear. Park
+  // Spots are pinned ON the halfway line out in the two side lanes
+  // (RUNE_SPOTS_FORCE), which run the full height clear of the bars and the
+  // centre block — so every approach used below is known-clear. Park
   // P in the left gate's lane but outside the pickup circle, so the pair is
   // observable in a snapshot before P claims one.
   await goTo(P, RUNE_SPOTS[0].x, 900);
@@ -727,8 +756,8 @@ async function checkPowers() {
   check(P.me().power === POWER.NONE, 'a power lapses after 7 seconds');
 
   // ---- wave 2: SHIELD (P camps the same gate — both fill every wave) ----
-  // Enemy straight up the same lane from the gate: a clear line of fire with no
-  // obstacle between (the crossbar spans x 260-460, this lane is x=220).
+  // Enemy straight up the same lane from the rune: a clear line of fire with no
+  // obstacle between (the bars span x 210-510, this lane is x=120).
   await goTo(V, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y - 240);
   guard = 0;
   while (P.me().power !== POWER.SHIELD && guard++ < 80) await P.drive(12, 0, 0);
@@ -1244,7 +1273,7 @@ async function main() {
   // Runes pinned so checkPowers() meets DOUBLE -> SHIELD -> OVERDRIVE -> POWER
   // SHOT at gate 0 in that order; live waves are random (checkRuneRoll covers
   // the roll). Each pair is two different kinds, as the real roll guarantees.
-  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4', RUNE_SPOTS_FORCE: '220:640,500:640' });
+  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4', RUNE_SPOTS_FORCE: '120:640,600:640' });
 
   try {
     // ---- join ----
@@ -1289,13 +1318,13 @@ async function main() {
     const ackGap = (A.seq - A.snap.lastAckSeq + 65536) % 65536;
     check(ackGap <= 3, `input ack tracks seq (gap ${ackGap})`);
 
-    // ---- position for a clear VERTICAL shot down the left lane (x≈200) ----
-    // The centre line is blocked by the cross-bars, centre block and both
-    // towers, but the lane between the wall nubs (x 160..240) runs clear from
-    // y≈250 to y≈1030. A (BLUE) spawns bottom-left, B (RED) top-right; both
+    // ---- position for a clear VERTICAL shot down the left lane (x≈110) ----
+    // The centre line is blocked by the two bars, the centre block and both
+    // towers, but the left lane (everything below x=210) runs clear the full
+    // height of the arena. A (BLUE) spawns bottom-left, B (RED) top-right; both
     // slide into the lane and close to ~290px, well inside the shell's range.
-    check(await goTo(A, 200, 870), 'A reached the lane firing position');
-    check(await goTo(B, 200, 580), 'B reached the lane firing position');
+    check(await goTo(A, 110, 870), 'A reached the lane firing position');
+    check(await goTo(B, 110, 580), 'B reached the lane firing position');
     await sleep(150);
     const aPos = A.me(), bPos = B.me();
     console.log(`  A at (${Math.round(aPos.x)},${Math.round(aPos.y)}) B at (${Math.round(bPos.x)},${Math.round(bPos.y)})`);
@@ -1341,8 +1370,11 @@ async function main() {
     while (A.snap.towerHp[RED] > 0 && guard++ < siegeSteps) {
       const a = A.me();
       if (!a || !a.alive) { await A.drive(6, 0, 0); continue; }   // wait out respawn
-      if (Math.abs(a.x - 200) > 22) { await A.drive(6, Math.sign(200 - a.x), 0); continue; }
-      if (a.y > 345) { await A.drive(6, 0, -1); continue; }       // up the lane into range
+      if (Math.abs(a.x - 110) > 22) { await A.drive(6, Math.sign(110 - a.x), 0); continue; }
+      // Climb until the tower is genuinely inside TOWER_RANGE (330px). From the
+      // left lane that is y<=300: at y=345 the range check is a coin flip and
+      // the tower may never return fire, which the siege assertions depend on.
+      if (a.y > 300) { await A.drive(6, 0, -1); continue; }       // up the lane into range
       await A.drive(6, 0, 0, true, Math.atan2(130 - a.y, 360 - a.x));
       if (A.snap.towerHp[RED] < TOWER_HP) sawDamage = true;
       if (!sawTowerFire) sawTowerFire = A.ev('fire').some((e) => e.id >= TOWER_OWNER_BASE);

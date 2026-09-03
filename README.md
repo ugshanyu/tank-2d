@@ -1,13 +1,23 @@
 # TANK
 
 Realtime **2v2 tower-destruction** tank arena for mobile: **tilt your phone to drive,
-touch to aim & shoot** (a joystick takes over if motion access is denied). Instant respawns, bouncing shells. Ships as a **Usion
-direct-mode game** — identity, rooms, and invites come from the platform; the
+touch to aim & shoot** (a joystick takes over if motion access is denied). Fast
+tanks (265 px/s, ~2.7 s to cross the arena), a shot every 0.7 s, instant
+respawns. Ships as a **Usion direct-mode game** — identity, rooms, and invites come from the platform; the
 client talks binary WebSocket straight to this authoritative server (zero relay hop).
 
 The arena is a single **720x1280 portrait screen**. The whole map is visible at
 all times — the camera never moves, only the tanks do, so there is no scrolling
 and no off-screen threat.
+
+**The map is three shapes**: a block in the middle, and one bar of cover in front
+of each tower (`client/shared/sim.js` `OBSTACLES`). That is deliberate — the
+previous ten-rect layout added corner walls and wall nubs that produced
+collisions you could not see coming, on a map small enough to read in a glance.
+Both side lanes (everything outside x 210-510) run the full height of the arena,
+so long-range duels and a fast flank are both still on. The layout is
+**point-symmetric** through the arena centre: the two teams see the same map from
+opposite ends, and the rune picker relies on that symmetry to mirror spots.
 
 ## Match rules
 
@@ -30,7 +40,7 @@ and no off-screen threat.
   game: the old always-2v2 fill gave a lone player a `rush` teammate whose
   designed job is to trade its life, so they spent ~40% of the match effectively
   1-v-2 while that teammate sat in respawn.
-- **Each team has a tower.** Destroy the enemy tower (400 HP, 12 shells) and your
+- **Each team has a tower.** Destroy the enemy tower (560 HP, ~17 shells) and your
   team wins the match; it restarts automatically after 6 s. Kills are pressure,
   not the objective.
 - **Towers shoot back.** A tower auto-acquires the nearest living enemy tank

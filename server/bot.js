@@ -135,12 +135,13 @@ function losClear(x1, y1, x2, y2, skipTower = -1) {
 // small and static, so a fixed waypoint graph is both cheaper and far better
 // behaved than any amount of local avoidance.
 //
-// Nodes sit in the two clear lanes, in the gaps between the cross-bars and the
-// centre block, and on the approach to each tower.
+// Nodes sit in the two side lanes (x 110 / 610 — clear of the bars at x 210-510
+// and the centre block at x 260-460) and up the centre column in the gaps
+// between those three rects, including the approach to each tower.
 const NODES = [
-  { x: 200, y: 180 }, { x: 200, y: 430 }, { x: 200, y: 640 }, { x: 200, y: 850 }, { x: 200, y: 1100 },
-  { x: 520, y: 180 }, { x: 520, y: 430 }, { x: 520, y: 640 }, { x: 520, y: 850 }, { x: 520, y: 1100 },
-  { x: 360, y: 230 }, { x: 360, y: 500 }, { x: 360, y: 780 }, { x: 360, y: 1050 },
+  { x: 110, y: 180 }, { x: 110, y: 480 }, { x: 110, y: 640 }, { x: 110, y: 800 }, { x: 110, y: 1100 },
+  { x: 610, y: 180 }, { x: 610, y: 480 }, { x: 610, y: 640 }, { x: 610, y: 800 }, { x: 610, y: 1100 },
+  { x: 360, y: 250 }, { x: 360, y: 500 }, { x: 360, y: 780 }, { x: 360, y: 1030 },
 ];
 
 // Can a TANK travel this segment without clipping anything?
