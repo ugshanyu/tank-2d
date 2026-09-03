@@ -10,15 +10,6 @@ The arena is a single **720x1280 portrait screen**. The whole map is visible at
 all times — the camera never moves, only the tanks do, so there is no scrolling
 and no off-screen threat.
 
-**The map is three shapes**: a block in the middle, and one bar of cover in front
-of each tower (`client/shared/sim.js` `OBSTACLES`). That is deliberate — the
-previous ten-rect layout added corner walls and wall nubs that produced
-collisions you could not see coming, on a map small enough to read in a glance.
-Both side lanes (everything outside x 210-510) run the full height of the arena,
-so long-range duels and a fast flank are both still on. The layout is
-**point-symmetric** through the arena centre: the two teams see the same map from
-opposite ends, and the rune picker relies on that symmetry to mirror spots.
-
 ## Match rules
 
 - **Two teams**, BLUE (bottom) and RED (top), max 4 players. Joiners are

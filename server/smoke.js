@@ -678,7 +678,7 @@ async function checkRuneSpots() {
   check(!runeSpotClear(OBSTACLES[0].x + OBSTACLES[0].w / 2, OBSTACLES[0].y + OBSTACLES[0].h / 2),
     'a spot inside the centre block is rejected');
   check(!runeSpotClear(TOWERS[0].x, TOWERS[0].y + 100), 'a spot right under a tower is rejected');
-  check(runeSpotClear(110, 760), 'the left lane below the halfway line is legal');
+  check(runeSpotClear(220, 760), 'the left lane below the halfway line is legal');
   // deterministic rand -> deterministic spot; forced spots pass straight through
   const [d1] = pickRuneSpots(() => 0.5); const [d2] = pickRuneSpots(() => 0.5);
   check(d1.x === d2.x && d1.y === d2.y, 'an injected rand makes the pick reproducible');
@@ -715,9 +715,8 @@ async function checkPowers() {
   check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
 
   // ---- wave 1: DOUBLE SHOT at BOTH spots ----
-  // Spots are pinned ON the halfway line out in the two side lanes
-  // (RUNE_SPOTS_FORCE), which run the full height clear of the bars and the
-  // centre block — so every approach used below is known-clear. Park
+  // Spots are pinned to the two gates ON the halfway line (RUNE_SPOTS_FORCE), in
+  // the gaps flanking the centre box, so every lane below is known-clear. Park
   // P in the left gate's lane but outside the pickup circle, so the pair is
   // observable in a snapshot before P claims one.
   await goTo(P, RUNE_SPOTS[0].x, 900);
@@ -756,8 +755,8 @@ async function checkPowers() {
   check(P.me().power === POWER.NONE, 'a power lapses after 7 seconds');
 
   // ---- wave 2: SHIELD (P camps the same gate — both fill every wave) ----
-  // Enemy straight up the same lane from the rune: a clear line of fire with no
-  // obstacle between (the bars span x 210-510, this lane is x=120).
+  // Enemy straight up the same lane from the gate: a clear line of fire with no
+  // obstacle between (the crossbar spans x 260-460, this lane is x=220).
   await goTo(V, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y - 240);
   guard = 0;
   while (P.me().power !== POWER.SHIELD && guard++ < 80) await P.drive(12, 0, 0);
@@ -785,22 +784,29 @@ async function checkPowers() {
   // ---- wave 3: OVERDRIVE ----
   // measure a clean straight-line run at base speed FIRST, as the control
   await goTo(P, RUNE_SPOTS[0].x, 760);
-  const runFor = async (ticks) => {
+  // Direction is load-bearing. The control run goes UP, which is also what parks
+  // P on the gate ready for the next wave. The boosted run must go DOWN: at
+  // 265 px/s a boosted half-second carries P far enough up the lane to enter the
+  // RED tower's 330px range, and the tower then fires THROUGH V, who is parked
+  // in that lane. Friendly fire is on, so V quietly loses a shell of health and
+  // the POWER SHOT check below — which needs a FULL-health victim — fails with
+  // no visible connection to what caused it.
+  const runFor = async (ticks, dir) => {
     const a = P.me();
-    await P.drive(ticks, 0, -1);
+    await P.drive(ticks, 0, dir);
     const b = P.me();
     return Math.abs(b.y - a.y);
   };
   await P.drive(20, 0, 0);                          // settle to a standstill
-  const baseRun = await runFor(30);
+  const baseRun = await runFor(30, -1);
   await P.drive(20, 0, 0);
 
   guard = 0;
   while (P.me().power !== POWER.SPEED && guard++ < 200) await P.drive(12, 0, 0);
   check(P.me().power === POWER.SPEED, `a wave grants OVERDRIVE (power ${P.me().power})`);
-  // P is standing ON the gate now; run the same 30 ticks boosted
+  // P is standing ON the gate now; run the same 30 ticks boosted, away from RED
   await P.drive(20, 0, 0);
-  const boostRun = await runFor(30);
+  const boostRun = await runFor(30, 1);
   const ratio = boostRun / baseRun;
   check(ratio > 1.25 && ratio < SPEED_MULT + 0.2,
     `OVERDRIVE really moves the tank faster (${baseRun.toFixed(0)}px -> ${boostRun.toFixed(0)}px, `
@@ -1273,7 +1279,7 @@ async function main() {
   // Runes pinned so checkPowers() meets DOUBLE -> SHIELD -> OVERDRIVE -> POWER
   // SHOT at gate 0 in that order; live waves are random (checkRuneRoll covers
   // the roll). Each pair is two different kinds, as the real roll guarantees.
-  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4', RUNE_SPOTS_FORCE: '120:640,600:640' });
+  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4', RUNE_SPOTS_FORCE: '220:640,500:640' });
 
   try {
     // ---- join ----
@@ -1318,13 +1324,13 @@ async function main() {
     const ackGap = (A.seq - A.snap.lastAckSeq + 65536) % 65536;
     check(ackGap <= 3, `input ack tracks seq (gap ${ackGap})`);
 
-    // ---- position for a clear VERTICAL shot down the left lane (x≈110) ----
-    // The centre line is blocked by the two bars, the centre block and both
-    // towers, but the left lane (everything below x=210) runs clear the full
-    // height of the arena. A (BLUE) spawns bottom-left, B (RED) top-right; both
+    // ---- position for a clear VERTICAL shot down the left lane (x≈200) ----
+    // The centre line is blocked by the cross-bars, centre block and both
+    // towers, but the lane between the wall nubs (x 160..240) runs clear from
+    // y≈250 to y≈1030. A (BLUE) spawns bottom-left, B (RED) top-right; both
     // slide into the lane and close to ~290px, well inside the shell's range.
-    check(await goTo(A, 110, 870), 'A reached the lane firing position');
-    check(await goTo(B, 110, 580), 'B reached the lane firing position');
+    check(await goTo(A, 200, 870), 'A reached the lane firing position');
+    check(await goTo(B, 200, 580), 'B reached the lane firing position');
     await sleep(150);
     const aPos = A.me(), bPos = B.me();
     console.log(`  A at (${Math.round(aPos.x)},${Math.round(aPos.y)}) B at (${Math.round(bPos.x)},${Math.round(bPos.y)})`);
@@ -1370,11 +1376,8 @@ async function main() {
     while (A.snap.towerHp[RED] > 0 && guard++ < siegeSteps) {
       const a = A.me();
       if (!a || !a.alive) { await A.drive(6, 0, 0); continue; }   // wait out respawn
-      if (Math.abs(a.x - 110) > 22) { await A.drive(6, Math.sign(110 - a.x), 0); continue; }
-      // Climb until the tower is genuinely inside TOWER_RANGE (330px). From the
-      // left lane that is y<=300: at y=345 the range check is a coin flip and
-      // the tower may never return fire, which the siege assertions depend on.
-      if (a.y > 300) { await A.drive(6, 0, -1); continue; }       // up the lane into range
+      if (Math.abs(a.x - 200) > 22) { await A.drive(6, Math.sign(200 - a.x), 0); continue; }
+      if (a.y > 345) { await A.drive(6, 0, -1); continue; }       // up the lane into range
       await A.drive(6, 0, 0, true, Math.atan2(130 - a.y, 360 - a.x));
       if (A.snap.towerHp[RED] < TOWER_HP) sawDamage = true;
       if (!sawTowerFire) sawTowerFire = A.ev('fire').some((e) => e.id >= TOWER_OWNER_BASE);

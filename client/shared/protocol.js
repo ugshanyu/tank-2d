@@ -135,12 +135,11 @@ export const SPEED_MULT = 1.55;         // 205 -> ~318 px/s
 export const RUNE_MARGIN = 60;
 export const RUNE_CLEARANCE = 60;       // TANK_RADIUS + RUNE_RADIUS + 12
 export const RUNE_TOWER_GAP = 190;
-// A known-good mirrored pair on the halfway line, out in the two side lanes.
-// Kept as the fallback if a random pick fails every attempt (it cannot on this
-// map; belt and braces for a future layout) and as the pin the deterministic
-// smoke phase uses via RUNE_SPOTS_FORCE. Must satisfy runeSpotClear() — the
-// old pair sat at x 220/500, which the wider centre block now covers.
-export const RUNE_SPOTS = [{ x: 120, y: ARENA_H / 2 }, { x: 600, y: ARENA_H / 2 }];
+// The two GATES — the gaps flanking the centre box on the halfway line. Kept as
+// the fallback if a random pick fails every attempt (it cannot on this map; belt
+// and braces for a future layout) and as the pin the deterministic smoke phase
+// uses via RUNE_SPOTS_FORCE. Must satisfy runeSpotClear().
+export const RUNE_SPOTS = [{ x: 220, y: ARENA_H / 2 }, { x: 500, y: ARENA_H / 2 }];
 
 // ---- Teams ----
 export const TEAM_COUNT = 2;            // 0 = BLUE (bottom half), 1 = RED (top half)
@@ -176,7 +175,7 @@ export const INTERP_DELAY_MS = 100;     // remote entities rendered this far in 
 // a server on a different version answers `stale` and closes, and the page
 // reloads itself — a cached client must never decode a layout it does not know
 // (the symptom is tanks teleporting around the arena, not an error).
-export const WIRE_VERSION = 3;
+export const WIRE_VERSION = 4;
 export const MSG = {
   // client -> server
   INPUT: 1,

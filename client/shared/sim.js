@@ -10,30 +10,27 @@ import {
 } from './protocol.js';
 
 // ---- Map: axis-aligned obstacle rects ----
-// THREE shapes, and that is the whole map: a block in the middle, and one bar of
-// cover in front of each tower. It reads in one glance from across a phone
-// screen, which the previous ten-rect layout did not — four corner walls and two
-// wall nubs added collisions nobody could see coming and lanes nobody could
-// name. Everything that layout was for is still here: the middle is contested
-// (the block), a tower has cover to fight from (the bars), and both side lanes
-// run the full height for long-range duels.
-//
-// Point-symmetric through the arena centre — every rect maps onto another under
-// (x,y) -> (ARENA_W-x, ARENA_H-y). That is not decoration: the two teams see the
-// same map from opposite ends, and the rune picker mirrors a spot through the
-// centre to place RED's twin (server/runes.js), which is only fair on a map with
-// this symmetry. Keep it if you edit these.
-//
-// Lane widths, since they are what makes or breaks driving: the bars span
-// x 210-510 and the block x 260-460, so each side lane gives a 26px-radius tank
-// a ~158px window for its centre — wide enough to take at speed without
-// clipping corners.
+// Layout for the 720x1280 single-screen arena, mirrored about BOTH axes so no
+// spawn corner has an advantage. The side lanes at x~200 and x~520 run the full
+// height unobstructed, which keeps long-range duels possible on a small map.
+// Lane width matters more than it looks: the gap must clear the 52px tank AND
+// leave room to steer. At 120px (nub ends x140, cross-bar starts x260) the
+// tank's centre has a ~68px window — narrow it further and the lane starts
+// catching corners on every pass.
 export const OBSTACLES = [
-  // centre block — the one feature in the middle
-  { x: 260, y: 580, w: 200, h: 120 },
-  // one bar of cover in front of each tower
-  { x: 210, y: 370, w: 300, h: 50 },
-  { x: 210, y: 860, w: 300, h: 50 },
+  // center block
+  { x: 300, y: 600, w: 120, h: 80 },
+  // horizontal cross-bars above and below center
+  { x: 260, y: 380, w: 200, h: 44 },
+  { x: 260, y: 856, w: 200, h: 44 },
+  // vertical side walls (four corners)
+  { x: 70, y: 200, w: 40, h: 170 },
+  { x: 610, y: 200, w: 40, h: 170 },
+  { x: 70, y: 910, w: 40, h: 170 },
+  { x: 610, y: 910, w: 40, h: 170 },
+  // mid-height nubs jutting in from the left/right walls
+  { x: 40, y: 618, w: 100, h: 44 },
+  { x: 580, y: 618, w: 100, h: 44 },
 ];
 
 // ---- Towers: one per team, the match objective ----

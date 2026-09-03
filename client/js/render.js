@@ -41,9 +41,10 @@ const TURRET_PIVOT = [{ x: 35.2, y: 36.5 }, { x: 33.1, y: 33.4 }];
 const TURRET_SCALE = [0.403, 0.426];
 const TOWER_W = 92;                   // TOWER_RADIUS 44 → octagon 88 + rim
 const CRATE_W = 46;                   // RUNE_RADIUS 22
-const TILE_WORLD = 320;               // one tile image = 2x2 floor plates of 160 world px.
-                                      // Must divide ARENA_H/2 exactly (640/320 = 2) or the
-                                      // blue/red split would cut a plate in half.
+const TILE_WORLD = 160;               // one tile image = 2x2 tiles of the 80px grid, the
+                                      // density the listing icon's floor reads at. Must divide
+                                      // ARENA_H/2 exactly (640/160 = 4) or the blue/red split
+                                      // would cut a tile in half.
 
 // Every fillStyle/strokeStyle assignment re-parses the CSS colour string, and
 // shade()/rgba() were rebuilding those strings ~14 times a frame. There are
@@ -180,11 +181,10 @@ export class Renderer {
     // arena a shape before a single sprite is drawn.
     const tiles = this.sprites.tile;
     if (tiles[0] && tiles[1]) {
-      // Big glossy plates, BLUE on the bottom half (team 0) and RED on the top, so
-      // territory reads from the ground itself. Deliberately coarse: at 160 world
-      // px a plate is three tank-widths, which keeps the floor a backdrop instead
-      // of the busy small-tile grid that competed with the sprites on it. The
-      // halfway line (y=640) lands exactly on a plate edge.
+      // The listing icon's floor: glossy bevelled neon-edged tiles, BLUE on the
+      // bottom half (team 0) and RED on the top, so territory reads from the
+      // ground itself. One image is 2x2 tiles of the 80px grid, so the seams land
+      // on the grid lines and the halfway line (y=640) is a tile edge.
       const half = ARENA_H / 2;
       for (const t of [0, 1]) {
         const pat = g.createPattern(tiles[t], 'repeat');
