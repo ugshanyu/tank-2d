@@ -460,7 +460,7 @@ export class Renderer {
     // spawn/hit/explosion effects under tanks
     for (const e of state.effects) this._effect(e, now);
 
-    // Power runes — one per gate, each in its power's own colour with its own
+    // Power runes — one per half, each in its power's own colour with its own
     // drawn icon. Rendered from the snapshot byte, so exactly as present as the
     // server says. Icons are PATHS, not glyphs: a font fallback that swapped ×2
     // for a tofu box would make two powers indistinguishable.

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import http from 'node:http';
 import WebSocket from 'ws';
 import {
-  MSG, DT, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
+  MSG, DT, WIRE_VERSION, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
   TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS, MAX_PLAYERS_PER_ROOM,
   FIRE_COOLDOWN, MAG_SIZE, RELOAD_TIME, RESPAWN_DELAY,
 } from '../client/shared/protocol.js';
@@ -68,7 +68,7 @@ class Bot {
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
       const to = setTimeout(() => reject(new Error('connect timeout')), 4000);
-      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name, invite })));
+      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: this.name, invite, wire: WIRE_VERSION })));
       ws.on('message', (data, isBinary) => {
         if (!isBinary) {
           const msg = JSON.parse(data.toString());
@@ -321,7 +321,7 @@ async function checkLiveShells(port) {
 
   await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error('live client connect timeout')), 5000);
-    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe' })));
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe', wire: WIRE_VERSION })));
     ws.on('message', (data, isBinary) => {
       if (!isBinary) {
         const msg = JSON.parse(data.toString());
@@ -391,7 +391,7 @@ async function checkNoRevives(port) {
 
   await new Promise((resolve, reject) => {
     const to = setTimeout(() => reject(new Error('revive probe connect timeout')), 5000);
-    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe' })));
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', name: 'probe', wire: WIRE_VERSION })));
     ws.on('message', (data, isBinary) => {
       if (!isBinary) {
         const msg = JSON.parse(data.toString());
@@ -537,7 +537,7 @@ async function checkBotBrain() {
     };
     const players = new Map([[1, bot]]);
     enemies.forEach((e, i) => players.set(10 + i, { id: 10 + i, tank: tank(10 + i, e.x, e.y, 1, e.hp ?? MAX_HP) }));
-    return { bot, room: { players, towers: [{ hp: TOWER_HP }, { hp: TOWER_HP }], runes } };
+    return { bot, room: { players, towers: [{ hp: TOWER_HP }, { hp: TOWER_HP }], runes, runeSpots: RUNE_SPOTS } };
   };
 
   // ---- runes: worth the detour? ----
@@ -618,9 +618,50 @@ async function checkRuneRoll() {
     'RUNE_FORCE pins the sequence and wraps');
 }
 
-// Power runes over the real protocol. Live waves roll at random, so this phase
-// pins them with RUNE_FORCE (see the server's config.js) to walk P through one
-// of each power in order; the roll itself is covered by checkRuneRoll().
+// WHERE a wave lands. Live spots are random, so the picker is asserted as a pure
+// function over many draws: one rune per half, mirrored, clear of every wall
+// and tower, and genuinely varied — a picker that quietly favoured one corner
+// would hand that team's tower a permanent buff.
+async function checkRuneSpots() {
+  const { pickRuneSpots, runeSpotClear } = await import('./runes.js');
+  const { ARENA_W, ARENA_H, RUNE_MARGIN, RUNE_SPOTS } = await import('../client/shared/protocol.js');
+  const { OBSTACLES, TOWERS } = await import('../client/shared/sim.js');
+  const seen = new Set();
+  let ok = true, mirrored = true, inHalf = true, clear = true, spread = 0;
+  const xs = [], ys = [];
+  for (let i = 0; i < 600; i++) {
+    const [a, b] = pickRuneSpots();
+    ok = ok && Number.isInteger(a.x) && Number.isInteger(a.y);
+    inHalf = inHalf && a.y >= ARENA_H / 2 + RUNE_MARGIN && a.y <= ARENA_H - RUNE_MARGIN
+      && a.x >= RUNE_MARGIN && a.x <= ARENA_W - RUNE_MARGIN
+      && b.y <= ARENA_H / 2 - RUNE_MARGIN;
+    mirrored = mirrored && b.x === ARENA_W - a.x && b.y === ARENA_H - a.y;
+    clear = clear && runeSpotClear(a.x, a.y) && runeSpotClear(b.x, b.y);
+    seen.add(`${a.x},${a.y}`); xs.push(a.x); ys.push(a.y);
+  }
+  check(ok && inHalf, 'every pick is an integer spot inside BLUE\'s half, off the walls');
+  check(mirrored, 'RED\'s rune is BLUE\'s point-mirrored through the centre');
+  check(clear, 'no pick ever lands inside a wall\'s clearance or under a tower');
+  check(seen.size > 400, `spots really vary (${seen.size} distinct in 600 waves)`);
+  spread = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+  check(spread > 0.5 * (ARENA_W - 2 * RUNE_MARGIN) * (ARENA_H / 2 - 2 * RUNE_MARGIN),
+    'and cover most of the half, not one favoured pocket');
+  // the clearance predicate itself, against the real map
+  check(!runeSpotClear(OBSTACLES[0].x + OBSTACLES[0].w / 2, OBSTACLES[0].y + OBSTACLES[0].h / 2),
+    'a spot inside the centre block is rejected');
+  check(!runeSpotClear(TOWERS[0].x, TOWERS[0].y + 100), 'a spot right under a tower is rejected');
+  check(runeSpotClear(220, 760), 'the left lane below the halfway line is legal');
+  // deterministic rand -> deterministic spot; forced spots pass straight through
+  const [d1] = pickRuneSpots(() => 0.5); const [d2] = pickRuneSpots(() => 0.5);
+  check(d1.x === d2.x && d1.y === d2.y, 'an injected rand makes the pick reproducible');
+  const forced = pickRuneSpots(Math.random, RUNE_SPOTS);
+  check(forced[0].x === RUNE_SPOTS[0].x && forced[1].y === RUNE_SPOTS[1].y, 'RUNE_SPOTS_FORCE pins the spots exactly');
+}
+
+// Power runes over the real protocol. Live waves roll at random and land at
+// random, so this phase pins both with RUNE_FORCE + RUNE_SPOTS_FORCE (see the
+// server's config.js) to walk P through one of each power in order; the roll is
+// covered by checkRuneRoll() and the placement by checkRuneSpots().
 // P picks every rune; W (P's teammate) supplies friendly-fire damage for the
 // heal check; V (the enemy) shoots the shield and eats the power shot.
 async function checkPowers() {
@@ -645,8 +686,9 @@ async function checkPowers() {
   const wounded = P.me().hp;
   check(wounded < MAX_HP && P.me().alive, `P wounded by friendly fire before the rune (hp ${wounded})`);
 
-  // ---- wave 1: DOUBLE SHOT at BOTH gates ----
-  // The gates sit ON the halfway line, in the gaps flanking the centre box. Park
+  // ---- wave 1: DOUBLE SHOT at BOTH spots ----
+  // Spots are pinned to the old gates ON the halfway line (RUNE_SPOTS_FORCE), in
+  // the gaps flanking the centre box, so every lane below is known-clear. Park
   // P in the left gate's lane but outside the pickup circle, so the pair is
   // observable in a snapshot before P claims one.
   await goTo(P, RUNE_SPOTS[0].x, 900);
@@ -655,7 +697,10 @@ async function checkPowers() {
   while ((!P.snap.runes || P.snap.runes.length === 0) && guard++ < 80) await P.drive(12, 0, 0);
   check(P.snap.runes.length === 2
         && P.snap.runes[0].kind === POWER.DOUBLE && P.snap.runes[1].kind === POWER.SHIELD,
-    `a wave fills both gates with DIFFERENT kinds (${JSON.stringify(P.snap.runes?.map((r) => r.kind))})`);
+    `a wave fills both spots with DIFFERENT kinds (${JSON.stringify(P.snap.runes?.map((r) => r.kind))})`);
+  check(P.snap.runes[0].x === RUNE_SPOTS[0].x && P.snap.runes[0].y === RUNE_SPOTS[0].y
+        && P.snap.runes[1].x === RUNE_SPOTS[1].x && P.snap.runes[1].y === RUNE_SPOTS[1].y,
+    'the snapshot carries each rune\'s POSITION (pinned spots round-trip exactly)');
 
   await goTo(P, RUNE_SPOTS[0].x, RUNE_SPOTS[0].y);
   guard = 0;
@@ -1192,13 +1237,14 @@ async function main() {
   await checkAuth();
   await checkBotBrain();
   await checkRuneRoll();
+  await checkRuneSpots();
   await checkAward();
   console.log('starting server…');
   // Bots off here: they would join the scripted match and wreck its assertions.
   // Runes pinned so checkPowers() meets DOUBLE -> SHIELD -> OVERDRIVE -> POWER
   // SHOT at gate 0 in that order; live waves are random (checkRuneRoll covers
   // the roll). Each pair is two different kinds, as the real roll guarantees.
-  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4' });
+  const srv = await startServer(PORT, { BOTS: '0', RUNE_FORCE: '1:2,2:1,4:3,3:4', RUNE_SPOTS_FORCE: '220:640,500:640' });
 
   try {
     // ---- join ----

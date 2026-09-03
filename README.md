@@ -40,11 +40,15 @@ and no off-screen threat.
 - **Friendly fire is on**, including on your own tower. A teamkill scores nothing.
 - Tanks and shells both collide with towers; shells *detonate* on a tower rather
   than bouncing off it, which is how a tower takes damage.
-- **Power runes.** Every 10 s a pair appears at the two mid-arena gates, on the
-  halfway line, equidistant from both towers. Driving over one heals you to full
-  and grants its power for 7 s. The two gates always carry **different** powers,
+- **Power runes.** Every 10 s a pair appears — **one in each half, at a random
+  spot** that moves every wave. The two spots are mirrored through the arena
+  centre (that is how the two teams see the map), so neither side's rune is
+  easier to reach; a spot is never inside a wall and never under a tower's
+  cannon (`server/runes.js` `pickRuneSpots`, positions carried in every
+  snapshot so late joiners see them too). Driving over one heals you to full and
+  grants its power for 7 s. The two runes always carry **different** powers,
   rolled at random, so a wave is a choice — shield or overdrive? — rather than a
-  race for two copies of one thing, and the middle never becomes predictable.
+  race for two copies of one thing.
 
   | Rune | Effect | How often |
   |---|---|---|

@@ -36,6 +36,17 @@ export const RUNE_FORCE = (env.RUNE_FORCE || '')
   .map((pair) => pair.split(':').map((n) => Number(n)))
   .filter((p) => p.length === 2 && p.every((n) => Number.isInteger(n) && n >= 0 && n <= 7));
 
+// Test-only: pin WHERE the runes land instead of rolling random spots, as
+// "x:y,x:y" (spot for team 0, spot for team 1), e.g. RUNE_SPOTS_FORCE=220:640,500:640.
+// Unset in production, where every wave picks fresh mirrored spots.
+export const RUNE_SPOTS_FORCE = (() => {
+  const spots = (env.RUNE_SPOTS_FORCE || '')
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((pair) => pair.split(':').map((n) => Number(n)));
+  const ok = spots.length === 2 && spots.every((p) => p.length === 2 && p.every((n) => Number.isFinite(n) && n >= 0));
+  return ok ? spots.map(([x, y]) => ({ x, y })) : null;
+})();
+
 // Optional browser-origin allowlist (comma-separated). Unset = allow all.
 export const ALLOWED_ORIGINS = (env.ALLOWED_ORIGINS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);

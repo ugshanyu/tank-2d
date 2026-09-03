@@ -117,13 +117,22 @@ export const DOUBLE_SPREAD = 0.07;      // rad between the two barrels of a doub
 // on every boosted tick. Acceleration scales with it, otherwise a faster top
 // speed just means a longer ramp and the boost reads as sluggish, not quick.
 export const SPEED_MULT = 1.55;         // 205 -> ~318 px/s
-// THE TWO GATES. On the halfway line (y = ARENA_H/2) the obstacles are the left
-// nub (x 40-140), the centre box (x 300-420) and the right nub (x 580-680) — so
-// the gaps flanking the centre box are at x≈220 and x≈500. Both runes sit dead
-// on the halfway line, equidistant from both towers: neither team is closer to
-// either gate, and taking one means crossing into the middle.
-// Clearance check: a 26px tank at x=220 has 54px either side; the 22px rune
-// never touches the nub (198 > 140) or the box (242 < 300).
+// WHERE a wave lands. One rune in EACH half, at a spot the server picks at
+// random every wave (server/runes.js pickRuneSpots) and carries in the snapshot
+// header — the client never guesses, and a mid-match joiner sees the right
+// place. Spot 0 is in BLUE's half (bottom), spot 1 is its point-mirror through
+// the arena centre in RED's half: that is how the two teams see the map, so
+// neither side's rune is easier to reach. A pick must keep RUNE_MARGIN from
+// the walls, RUNE_CLEARANCE from every obstacle (a 26px tank has to be able to
+// touch a 22px rune) and RUNE_TOWER_GAP from the half's own tower, so a rune is
+// never a free pickup sitting under the cannon.
+export const RUNE_MARGIN = 60;
+export const RUNE_CLEARANCE = 60;       // TANK_RADIUS + RUNE_RADIUS + 12
+export const RUNE_TOWER_GAP = 190;
+// The old fixed gates — the gaps flanking the centre box on the halfway line.
+// Kept as the fallback if a random pick fails every attempt (it cannot on this
+// map; belt and braces for a future layout) and as the pin the deterministic
+// smoke phase uses via RUNE_SPOTS_FORCE.
 export const RUNE_SPOTS = [{ x: 220, y: ARENA_H / 2 }, { x: 500, y: ARENA_H / 2 }];
 
 // ---- Teams ----
@@ -156,6 +165,11 @@ export const INTERP_DELAY_MS = 100;     // remote entities rendered this far in 
                                         // baseline this replaced.
 
 // ---- Binary message type ids ----
+// Bumped whenever the binary layout changes. The client sends it in `hello`;
+// a server on a different version answers `stale` and closes, and the page
+// reloads itself — a cached client must never decode a layout it does not know
+// (the symptom is tanks teleporting around the arena, not an error).
+export const WIRE_VERSION = 2;
 export const MSG = {
   // client -> server
   INPUT: 1,
@@ -235,11 +249,11 @@ export function decodePong(v) {
 
 // ---- SNAPSHOT: s->c ----
 // header: [u8 type][u32 tick][u16 lastAckSeq][u8 yourId][u8 count][u16 towerHp0][u16 towerHp1][u8 rune]
-//         (14 bytes)
-// rune: low nibble = kind at RUNE_SPOTS[0], high nibble = kind at RUNE_SPOTS[1]
-// (0 = that spot is empty) — positions derive from shared constants, so BOTH
-// runes cost one byte and survive mid-match joins (an event alone would be
-// missed by anyone who connected after it fired).
+//         [u16 rx0][u16 ry0][u16 rx1][u16 ry1]   (22 bytes)
+// rune: low nibble = kind of rune 0, high nibble = kind of rune 1 (0 = empty);
+// rx/ry = that rune's position in world px. Positions ride in EVERY snapshot
+// rather than in a spawn event so they survive mid-match joins and reconnects
+// (an event alone is missed by anyone who connected after it fired).
 // per tank (14 bytes):
 //   [u8 id][u16 x][u16 y][i16 vx][i16 vy][u8 hull][u8 turret][u8 hp][u8 flags][u8 score]
 // flags: bit0 = alive, bit1 = team, bits2-4 = ammo (0..7), bits5-7 = active
@@ -247,8 +261,8 @@ export function decodePong(v) {
 // so teams, ammo and powers cost 0 extra bytes per tank on the 60 Hz hot path —
 // and every one of them stays authoritative rather than client-guessed.
 const TANK_BYTES = 14;
-const SNAP_HEADER = 14;
-export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 0) {
+const SNAP_HEADER = 22;
+export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 0, spots = RUNE_SPOTS) {
   const buf = new ArrayBuffer(SNAP_HEADER + tanks.length * TANK_BYTES);
   const v = new DataView(buf);
   v.setUint8(0, MSG.SNAPSHOT);
@@ -259,6 +273,11 @@ export function encodeSnapshot(tick, lastAckSeq, yourId, tanks, towerHp, rune = 
   v.setUint16(9, Math.max(0, Math.min(65535, Math.round(towerHp[0] || 0))), true);
   v.setUint16(11, Math.max(0, Math.min(65535, Math.round(towerHp[1] || 0))), true);
   v.setUint8(13, rune & 0xff);
+  for (let i = 0; i < 2; i++) {
+    const s = spots[i] || RUNE_SPOTS[i];
+    v.setUint16(14 + i * 4, Math.max(0, Math.min(65535, Math.round(s.x))), true);
+    v.setUint16(16 + i * 4, Math.max(0, Math.min(65535, Math.round(s.y))), true);
+  }
   let o = SNAP_HEADER;
   for (const t of tanks) {
     v.setUint8(o, t.id);
@@ -284,8 +303,8 @@ export function decodeSnapshot(v /* DataView */) {
   const towerHp = [v.getUint16(9, true), v.getUint16(11, true)];
   const runeByte = v.getUint8(13);
   const runes = [];
-  if (runeByte & 0x0f) runes.push({ kind: runeByte & 0x0f, ...RUNE_SPOTS[0] });
-  if (runeByte >> 4) runes.push({ kind: runeByte >> 4, ...RUNE_SPOTS[1] });
+  if (runeByte & 0x0f) runes.push({ kind: runeByte & 0x0f, x: v.getUint16(14, true), y: v.getUint16(16, true) });
+  if (runeByte >> 4) runes.push({ kind: runeByte >> 4, x: v.getUint16(18, true), y: v.getUint16(20, true) });
   const tanks = [];
   let o = SNAP_HEADER;
   for (let i = 0; i < count; i++) {

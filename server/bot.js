@@ -10,7 +10,7 @@
 
 import {
   ARENA_W, ARENA_H, TANK_RADIUS, TOWER_RADIUS, TOWER_RANGE, TICK_RATE,
-  BULLET_SPEED, MAX_HP, POWER, RUNE_SPOTS, BULLET_DAMAGE, POWERSHOT_TOWER_DAMAGE,
+  BULLET_SPEED, MAX_HP, POWER, BULLET_DAMAGE, POWERSHOT_TOWER_DAMAGE,
   RESPAWN_DELAY, FIRE_COOLDOWN,
 } from '../client/shared/protocol.js';
 import { OBSTACLES, TOWERS } from '../client/shared/sim.js';
@@ -264,10 +264,10 @@ export function runePlan(room, bot) {
   const me = bot.tank;
   const heal = ((MAX_HP - me.hp) / MAX_HP) * RUNE_HEAL_VALUE;
   let best = null;
-  for (let i = 0; i < RUNE_SPOTS.length; i++) {
+  for (let i = 0; i < room.runeSpots.length; i++) {
     const kind = room.runes[i];
     if (!kind) continue;                     // claimed, or none this wave
-    const spot = RUNE_SPOTS[i];
+    const spot = room.runeSpots[i];          // re-rolled every wave (server-owned)
     const d = Math.hypot(spot.x - me.x, spot.y - me.y);
     let enemyD = Infinity;
     for (const p of room.players.values()) {

@@ -440,6 +440,16 @@ function startNet(resolveUrl) {
       if (m.t === 'error') toast(m.reason, 4000);
     },
     onStatus: (s, reason) => {
+      if (s === 'stale') {
+        // Deployed a new wire format under a page that is still running the old
+        // one. Reload rather than decode snapshots wrongly.
+        EL.offline.classList.add('on');
+        EL.offline.classList.remove('fatal');
+        EL.offline.firstElementChild.textContent = 'GAME UPDATED';
+        EL.offlineSub.textContent = 'reloading…';
+        setTimeout(() => location.reload(), 900);
+        return;
+      }
       EL.status.innerHTML = s === 'connected'
         ? `<span id="pingv"></span>`
         : `<span class="bad">${s === 'failed' ? 'offline' : s + '…'}</span>`;

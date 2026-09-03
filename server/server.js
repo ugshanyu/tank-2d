@@ -15,14 +15,14 @@ import {
   MAX_PLAYERS_PER_ROOM, TEAM_COUNT, TOWER_RADIUS, TOWER_HP, TOWER_RANGE,
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
   MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
-  POWER, RUNE_PERIOD, POWER_DURATION, RUNE_RADIUS, RUNE_SPOTS,
+  POWER, RUNE_PERIOD, POWER_DURATION, RUNE_RADIUS, WIRE_VERSION,
   POWER_SHOTS, SHIELD_BLOCKS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
 } from '../client/shared/protocol.js';
 import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
-import { rollRunePair } from './runes.js';
+import { rollRunePair, pickRuneSpots } from './runes.js';
 import { validateAccessToken } from './auth.js';
-import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS, BOTS_ENABLED, RUNE_FORCE } from './config.js';
+import { PORT, JWKS_URL, SERVICE_ID, ALLOWED_ORIGINS, BOTS_ENABLED, RUNE_FORCE, RUNE_SPOTS_FORCE } from './config.js';
 
 const MAX_CONNS = 128;
 const MAX_ROOMS = 32;
@@ -52,8 +52,9 @@ class Room {
     this.winner = -1;         // team that won the last match
     this.resetAt = 0;         // tick at which a finished match restarts
     this.wins = [0, 0];       // matches won, per team, for the life of the room
-    // power runes: one per mirrored spot, spawned as a same-kind PAIR each wave
-    this.runes = [0, 0];      // kind at RUNE_SPOTS[i], 0 = empty
+    // power runes: one per half, at spots re-rolled every wave (see stepRune)
+    this.runes = [0, 0];      // kind at runeSpots[i], 0 = empty
+    this.runeSpots = pickRuneSpots(Math.random, RUNE_SPOTS_FORCE);
     this.runeAt = 0;          // tick the next wave appears (0 = schedule on first step)
     this.runeCycle = 0;       // waves spawned so far (only RUNE_FORCE reads it)
     this.isInvite = false;    // set once, by whoever creates the room
@@ -409,15 +410,17 @@ function stepRune(room) {
     }
   }
 
-  // Each wave fills BOTH spots — one gate either side of the middle, at the same
-  // moment, so neither team owns the spawn — with two DIFFERENT powers drawn at
-  // random. A stale unclaimed rune is overwritten by the next wave. Fixed
-  // cadence: the next wave lands RUNE_PERIOD after this one regardless of
-  // pickups. Runes are pure server state broadcast in the snapshot byte (one
-  // nibble per gate), never predicted, so rolling them here is safe — the shared
-  // deterministic sim does not touch them.
+  // Each wave drops ONE rune in each half — at a fresh random spot, mirrored
+  // through the centre so neither side's is easier to reach — at the same
+  // moment, with two DIFFERENT powers drawn at random. A stale unclaimed rune
+  // is overwritten (and moved) by the next wave. Fixed cadence: the next wave
+  // lands RUNE_PERIOD after this one regardless of pickups. Runes are pure
+  // server state broadcast in the snapshot header (kind nibble + position),
+  // never predicted, so rolling them here is safe — the shared deterministic
+  // sim does not touch them.
   if (tick >= room.runeAt) {
     const [a, b] = rollRunePair(room.runeCycle++, RUNE_FORCE);
+    room.runeSpots = pickRuneSpots(Math.random, RUNE_SPOTS_FORCE);
     room.runes[0] = a;
     room.runes[1] = b;
     room.runeAt = tick + Math.round(RUNE_PERIOD * TICK_RATE);
@@ -426,7 +429,7 @@ function stepRune(room) {
   // pickup, per spot: first living tank to touch one — full heal + power, 7 s
   for (let i = 0; i < 2; i++) {
     if (!room.runes[i]) continue;
-    const spot = RUNE_SPOTS[i];
+    const spot = room.runeSpots[i];
     for (const p of room.players.values()) {
       const t = p.tank;
       if (!t.alive) continue;
@@ -450,7 +453,7 @@ function sendSnapshots(room) {
   for (const p of room.players.values()) {
     if (!p.ws || p.ws.readyState !== 1) continue;
     if (p.ws.bufferedAmount > 64 * 1024) continue; // don't pile onto a choked socket
-    p.ws.send(encodeSnapshot(tick, p.lastAckSeq, p.id, tanks, towerHp, room.runeByte()));
+    p.ws.send(encodeSnapshot(tick, p.lastAckSeq, p.id, tanks, towerHp, room.runeByte(), room.runeSpots));
   }
 }
 
@@ -745,6 +748,13 @@ wss.on('connection', (ws, req) => {
         return;
       }
       if (msg.t === 'hello' && !player) {
+        // A client built against another snapshot layout must not be handed
+        // snapshots it will mis-decode. Tell it, close, and it reloads itself.
+        if ((msg.wire | 0) !== WIRE_VERSION) {
+          ws.send(JSON.stringify({ t: 'stale', wire: WIRE_VERSION }));
+          ws.close(4009, 'stale client');
+          return;
+        }
         // Room + identity come from the TOKEN, never the client. The display
         // name is the only client-supplied field (cosmetic) — sanitized, and it
         // falls back to the token's name claim / user id.

@@ -3,7 +3,7 @@
 // snapshot ticks (EMA) so interpolation has a stable clock without pong math.
 
 import {
-  MSG, DT, INTERP_DELAY_MS, decodeSnapshot, decodePong, encodeInput, encodePing,
+  MSG, DT, INTERP_DELAY_MS, WIRE_VERSION, decodeSnapshot, decodePong, encodeInput, encodePing,
 } from '../shared/protocol.js';
 
 const MAX_ATTEMPTS = 6;
@@ -108,7 +108,7 @@ export class Net {
       this._interpTarget = undefined;
       this._interpSince = 0;
       this._rttRing.length = 0;
-      ws.send(JSON.stringify({ t: 'hello', name: this.name, invite: this.invite }));
+      ws.send(JSON.stringify({ t: 'hello', name: this.name, invite: this.invite, wire: WIRE_VERSION }));
       clearInterval(this._pingTimer);
       this._pingTimer = setInterval(() => {
         if (ws.readyState === 1) ws.send(encodePing(performance.now()));
@@ -121,6 +121,13 @@ export class Net {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg.t === 'welcome') { this.connected = true; this.onStatus('connected'); }
+        if (msg.t === 'stale') {
+          // The server speaks a newer wire format than this page. Stop
+          // reconnecting (onclose would only loop) and let the UI reload.
+          this.closedByUs = true;
+          this.onStatus('stale');
+          return;
+        }
         this.onEvent(msg);
         return;
       }
