@@ -191,12 +191,12 @@ export class Renderer {
         g.fillStyle = pat;
         g.fillRect(0, t === 0 ? half : 0, ARENA_W, half);
       }
-      // A lit centre falling off toward the walls, like the icon's key light —
-      // and it keeps the middle (where the runes drop) the brightest spot.
-      const lit = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 60, ARENA_W / 2, ARENA_H / 2, 820);
-      lit.addColorStop(0, 'rgba(255,255,255,0.10)');
-      lit.addColorStop(0.5, 'rgba(255,255,255,0.03)');
-      lit.addColorStop(1, 'rgba(0,0,0,0.18)');
+      // No key light on the floor: the ground is the backdrop, and anything that
+      // lifts it competes with the tanks and shells that have to read on it.
+      // Only a darkening vignette toward the walls, so the edges recede.
+      const lit = g.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 200, ARENA_W / 2, ARENA_H / 2, 860);
+      lit.addColorStop(0, 'rgba(0,0,0,0)');
+      lit.addColorStop(1, 'rgba(0,0,0,0.30)');
       g.fillStyle = lit;
       g.fillRect(0, 0, ARENA_W, ARENA_H);
     } else {
