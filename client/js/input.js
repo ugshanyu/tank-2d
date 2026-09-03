@@ -5,7 +5,13 @@
 // free) and the second finger aims and shoots. WASD/arrows + mouse on desktop.
 // Pointer Events throughout.
 
-const TILT_RANGE_DEG = 14;   // degrees of tilt for full speed
+// Degrees of tilt for full speed — the sensitivity dial, and LOWER is more
+// sensitive. At 14 you had to lay the phone over a long way to get everything
+// out of the tank, which reads as a heavy, unresponsive vehicle; 9 puts full
+// speed inside a comfortable wrist roll, so small corrections move you and the
+// top end is actually reachable while sitting up. The 45ms smoothing below is
+// what keeps this from turning sensor noise into twitch.
+const TILT_RANGE_DEG = 9;
 const JOY_MAX = 52;          // px of drag for full joystick deflection. 78 was
                              // most of a thumb's reach, so "touch and go" felt
                              // like winding up before anything happened.
