@@ -9,8 +9,13 @@ import WebSocket from 'ws';
 import {
   MSG, DT, WIRE_VERSION, encodeInput, decodeInput, encodePing, decodeSnapshot, MAX_HP, BULLET_DAMAGE,
   TOWER_HP, TOWER_OWNER_BASE, MATCH_RESET_DELAY, MAX_LAG_TICKS, MAX_PLAYERS_PER_ROOM,
-  FIRE_COOLDOWN, MAG_SIZE, RELOAD_TIME, RESPAWN_DELAY,
+  FIRE_COOLDOWN, MAG_SIZE, RELOAD_TIME, RESPAWN_DELAY, TANK_RADIUS, TOWER_RADIUS,
+  ARENA_W, ARENA_H,
 } from '../client/shared/protocol.js';
+import {
+  OBSTACLES, TOWERS, randomTowerSpawn,
+  TOWER_SPAWN_MIN_DISTANCE, TOWER_SPAWN_MAX_DISTANCE,
+} from '../client/shared/sim.js';
 
 // How long a sustained siege actually takes, DERIVED rather than hard-coded — a
 // fixed step budget silently becomes a timeout the moment the fire rate changes,
@@ -28,6 +33,43 @@ function check(cond, label) {
   else { console.error(`FAIL  ${label}`); failures++; }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function spawnGeometryIsSafe(point) {
+  if (point.x < TANK_RADIUS || point.x > ARENA_W - TANK_RADIUS
+      || point.y < TANK_RADIUS || point.y > ARENA_H - TANK_RADIUS) return false;
+  for (const rect of OBSTACLES) {
+    const x = Math.max(rect.x, Math.min(point.x, rect.x + rect.w));
+    const y = Math.max(rect.y, Math.min(point.y, rect.y + rect.h));
+    if (Math.hypot(point.x - x, point.y - y) < TANK_RADIUS) return false;
+  }
+  return TOWERS.every((tower) => (
+    Math.hypot(point.x - tower.x, point.y - tower.y) >= TOWER_RADIUS + TANK_RADIUS
+  ));
+}
+
+function isNearOwnTower(tank) {
+  const tower = TOWERS.find((candidate) => candidate.team === tank.team);
+  const distance = Math.hypot(tank.x - tower.x, tank.y - tower.y);
+  return distance >= TOWER_SPAWN_MIN_DISTANCE - 1
+    && distance <= TOWER_SPAWN_MAX_DISTANCE + 1;
+}
+
+function checkTowerSpawns() {
+  for (const team of [0, 1]) {
+    const samples = Array.from({ length: 96 }, () => randomTowerSpawn(team));
+    const tower = TOWERS[team];
+    check(samples.every((point) => {
+      const distance = Math.hypot(point.x - tower.x, point.y - tower.y);
+      return distance >= TOWER_SPAWN_MIN_DISTANCE - 1e-6
+        && distance <= TOWER_SPAWN_MAX_DISTANCE + 1e-6;
+    }), `team ${team} deployments stay near its own tower`);
+    check(samples.every((point) => team === 0 ? point.y < tower.y : point.y > tower.y),
+      `team ${team} deployments stay on the battlefield-facing tower arc`);
+    check(samples.every(spawnGeometryIsSafe), `team ${team} deployment arc clears walls and towers`);
+    check(new Set(samples.map((point) => `${Math.round(point.x)},${Math.round(point.y)}`)).size > 80,
+      `team ${team} deployment positions are genuinely varied`);
+  }
+}
 
 async function startServer(port, extraEnv = {}) {
   const srv = spawn('node', ['server/server.js'], {
@@ -708,6 +750,7 @@ async function checkPowers() {
   // W wounds P (friendly fire) so the heal on pickup is observable — exactly ONE
   // shot: drive() paces on wall time, so a long firing burst lands three shells
   // and kills P outright, which cascades into every later assertion.
+  await goTo(P, 200, 1030);
   await goTo(W, 300, 1030);
   await W.drive(4, 0, 0, true, Math.PI);
   await sleep(400);
@@ -1278,6 +1321,7 @@ async function checkCombatRules() {
 }
 
 async function main() {
+  checkTowerSpawns();
   checkProtocol();
   await checkServiceId();
   await checkTilt();
@@ -1316,6 +1360,8 @@ async function main() {
     // ---- teams + towers present ----
     check(a0.team === 0, `A on team 0 / BLUE (got ${a0.team})`);
     check(b0.team === 1, `B auto-balanced onto team 1 / RED (got ${b0.team})`);
+    check(isNearOwnTower(a0) && isNearOwnTower(b0),
+      'both teams initially deploy randomly near their own tower');
     check(
       A.snap.towerHp[0] === TOWER_HP && A.snap.towerHp[1] === TOWER_HP,
       `both towers at full hp (${A.snap.towerHp.join('/')})`,
@@ -1377,6 +1423,7 @@ async function main() {
     await sleep(RESPAWN_DELAY * 1000 + 700);
     check(B.me().alive && B.me().hp === MAX_HP, 'B respawned alive at full hp');
     check(B.ev('spawn').some((e) => e.id === B.id), 'spawn event broadcast');
+    check(isNearOwnTower(B.me()), 'respawn returns B near its own tower');
 
     // ---- towers: return fire, damage, and the win condition ----
     // A (BLUE) climbs the left lane into RED tower range and sieges it. The
@@ -1413,6 +1460,8 @@ async function main() {
       `towers restored on restart (${A.snap.towerHp.join('/')})`,
     );
     check(A.me().alive && A.me().hp === MAX_HP, 'A respawned at full hp for the new match');
+    check(isNearOwnTower(A.me()) && isNearOwnTower(B.me()),
+      'fresh match redeploys both teams near their own towers');
 
     // ---- leave / rejoin ----
     A.close();

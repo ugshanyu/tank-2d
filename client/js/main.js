@@ -14,7 +14,7 @@ import { Game } from './game.js';
 import { Renderer, teamColor, setShakeScale, getShakeScale } from './render.js';
 import { Sfx, haptic } from './audio.js';
 import { awardMatch, load as loadProfile, levelFromXp } from './profile.js';
-import { makeTank, stepTank, stepBullet, TEAM_SPAWNS } from '../shared/sim.js';
+import { makeTank, stepTank, stepBullet, randomTowerSpawn } from '../shared/sim.js';
 
 const canvas = document.getElementById('game');
 const $ = (id) => document.getElementById(id);
@@ -725,7 +725,7 @@ function startSoloPractice() {
   soloActive = true;
   $('status').innerHTML = '<span>practice</span>';
 
-  const spawn = TEAM_SPAWNS[0][0];
+  const spawn = randomTowerSpawn(0);
   const tank = makeTank(1, spawn.x, spawn.y, 0);
   const bullets = [];
   const effects = [];

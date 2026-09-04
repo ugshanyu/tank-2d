@@ -53,6 +53,26 @@ export const TEAM_SPAWNS = [
 // Flat list kept for callers that just want "somewhere valid" (and for tests).
 export const SPAWN_POINTS = [...TEAM_SPAWNS[0], ...TEAM_SPAWNS[1]];
 
+// Fresh tanks deploy in a broad arc in front of their own tower. Keeping this
+// generator in the shared map module makes the rule easy to verify while the
+// server remains the only authority that actually chooses a live spawn.
+export const TOWER_SPAWN_MIN_DISTANCE = 140;
+export const TOWER_SPAWN_MAX_DISTANCE = 220;
+export function randomTowerSpawn(team, random = Math.random) {
+  const normalizedTeam = team === 1 ? 1 : 0;
+  const tower = TOWERS[normalizedTeam];
+  const distance = TOWER_SPAWN_MIN_DISTANCE
+    + random() * (TOWER_SPAWN_MAX_DISTANCE - TOWER_SPAWN_MIN_DISTANCE);
+  // Team 0 faces north from the bottom; team 1 faces south from the top.
+  const angle = normalizedTeam === 0
+    ? -Math.PI * 3 / 4 + random() * Math.PI / 2
+    : Math.PI / 4 + random() * Math.PI / 2;
+  return {
+    x: tower.x + Math.cos(angle) * distance,
+    y: tower.y + Math.sin(angle) * distance,
+  };
+}
+
 // Push a circle out of an AABB along the axis of least penetration.
 // Returns null if no overlap, else {nx, ny} the outward normal used.
 function resolveCircleRect(c, r, rect) {

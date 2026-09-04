@@ -16,9 +16,11 @@ import {
   TOWER_FIRE_COOLDOWN, TOWER_MUZZLE_OFFSET, TOWER_OWNER_BASE, MATCH_RESET_DELAY,
   MAX_LAG_TICKS, MAG_SIZE, RELOAD_TIME, decodeInput, encodeSnapshot, encodePong,
   POWER, RUNE_PERIOD, POWER_DURATION, RUNE_RADIUS, WIRE_VERSION,
-  POWER_SHOTS, SHIELD_BLOCKS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD,
+  POWER_SHOTS, SHIELD_BLOCKS, POWERSHOT_TOWER_DAMAGE, DOUBLE_SPREAD, ARENA_W, ARENA_H,
 } from '../client/shared/protocol.js';
-import { stepTank, stepBullet, makeTank, TEAM_SPAWNS, TOWERS, OBSTACLES } from '../client/shared/sim.js';
+import {
+  stepTank, stepBullet, makeTank, randomTowerSpawn, TEAM_SPAWNS, TOWERS, OBSTACLES,
+} from '../client/shared/sim.js';
 import { botInput, BOT_PROFILES } from './bot.js';
 import { rollRunePair, pickRuneSpots } from './runes.js';
 import { validateAccessToken } from './auth.js';
@@ -228,18 +230,36 @@ function getRoom(id, invite = false) {
 }
 
 function pickSpawn(room, team) {
-  // your own half's spawn point that is farthest from any living ENEMY
-  const points = TEAM_SPAWNS[team] || TEAM_SPAWNS[0];
-  let best = points[0], bestD = -1;
-  for (const s of points) {
-    let d = Infinity;
-    for (const p of room.players.values()) {
-      if (!p.tank.alive || p.tank.team === team) continue;
-      d = Math.min(d, Math.hypot(p.tank.x - s.x, p.tank.y - s.y));
-    }
-    if (d > bestD) { bestD = d; best = s; }
+  const occupied = [...room.players.values()].filter((p) => p.tank.alive);
+  const circleClearsRect = (point, rect, radius = TANK_RADIUS + 6) => {
+    const x = Math.max(rect.x, Math.min(point.x, rect.x + rect.w));
+    const y = Math.max(rect.y, Math.min(point.y, rect.y + rect.h));
+    return Math.hypot(point.x - x, point.y - y) >= radius;
+  };
+  const isSafe = (point) => (
+    point.x >= TANK_RADIUS + 6 && point.x <= ARENA_W - TANK_RADIUS - 6
+    && point.y >= TANK_RADIUS + 6 && point.y <= ARENA_H - TANK_RADIUS - 6
+    && OBSTACLES.every((rect) => circleClearsRect(point, rect))
+    && TOWERS.every((tower) => (
+      Math.hypot(point.x - tower.x, point.y - tower.y)
+        >= TOWER_RADIUS + TANK_RADIUS + 6
+    ))
+    && occupied.every((p) => (
+      Math.hypot(point.x - p.tank.x, point.y - p.tank.y) >= TANK_RADIUS * 2 + 12
+    ))
+  );
+
+  // The first safe sample wins, so every deployment is genuinely random rather
+  // than repeatedly converging on the same mathematically "best" point.
+  for (let attempt = 0; attempt < 48; attempt++) {
+    const point = randomTowerSpawn(team);
+    if (isSafe(point)) return point;
   }
-  return best;
+
+  // Extremely crowded rooms still get a known-good tower-side fallback.
+  const fallbacks = [...(TEAM_SPAWNS[team] || TEAM_SPAWNS[0])]
+    .sort(() => Math.random() - 0.5);
+  return fallbacks.find(isSafe) || fallbacks[0];
 }
 
 // ---------- per-tick simulation ----------
