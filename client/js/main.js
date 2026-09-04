@@ -21,10 +21,10 @@ const $ = (id) => document.getElementById(id);
 
 // Cached once — these were being looked up ~10x per frame.
 const EL = {};
-for (const id of ['status', 'respawn', 'respawnIn', 'toast', 'calibrate',
+for (const id of ['status', 'respawn', 'respawnIn', 'toast',
                   'match', 'matchWho', 'matchSub', 'matchTally', 'hurt', 'gear',
                   'sheet', 'sheetClose', 'optStick', 'optTilt', 'optSound', 'optHaptics',
-                  'optCal', 'optHelp', 'intro', 'introGo', 'introDrive',
+                  'optHelp', 'intro', 'introGo', 'introDrive',
                   'offline', 'offlineSub', 'shake0', 'shake1', 'shake2',
                   'introAim', 'motion', 'motionGo', 'motionSkip', 'lobby', 'lobbyTitle', 'lobbyList', 'lobbyStart', 'lobbyInvite', 'lobbyHint', 'feed', 'killbanner', 'poseRow', 'poseUpright', 'poseAngled', 'poseFlat',
                   'matchCard', 'stKills', 'stDeaths', 'stTower', 'xpLevel', 'xpGain', 'xpFill']) {
@@ -99,7 +99,6 @@ function onReady() {
   armFirstGesture();
   wireUi();
   maybeAskMotion();
-  EL.calibrate.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   connectAndPlay();
   maybeShowIntro();
 }
@@ -278,7 +277,6 @@ function wireUi() {
   EL.shake0.addEventListener('click', () => { setShakeScale(0); syncSheet(); });
   EL.shake1.addEventListener('click', () => { setShakeScale(0.5); syncSheet(); });
   EL.shake2.addEventListener('click', () => { setShakeScale(1); syncSheet(); });
-  EL.optCal.addEventListener('click', () => { input.calibrate(); toast('Tilt re-centred', 1400); });
   EL.optHelp.addEventListener('click', () => { openSheet(false); showIntro(); });
   EL.lobbyStart.addEventListener('click', () => { if (net) net.sendJson({ t: 'start' }); });
   EL.lobbyInvite.addEventListener('click', async () => {

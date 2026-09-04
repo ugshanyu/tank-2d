@@ -1125,24 +1125,35 @@ async function checkTilt() {
   check(input.mode === 'tilt', 'and the game switches to tilt steering when that is the preference');
   check(store.get('tank.steer') == null, 'the automatic switch is still not a stored preference');
 
-  // Held at the posture the player selected, the tank must sit still. (The
-  // smoothing is time-based, so settle it before sampling.)
+  // Startup pose must NEVER become neutral. The default is the same fixed
+  // comfortable angle on every launch, regardless of the first sensor reading.
+  check(input.tiltPreset === 'angled' && input._beta0 === 32 && input._gamma0 === 0,
+    `default neutral is fixed at the Angled preset (${input._beta0},${input._gamma0})`);
+
+  // Held at the fixed posture, the tank must sit still. (The smoothing is
+  // time-based, so settle it before sampling.)
   // The reading is eased on WALL CLOCK, so real time has to pass between polls.
   const settle = async (beta) => {
     for (let i = 0; i < 5; i++) { emit(beta, 0); await sleep(60); input.poll(); }
   };
-  // The default 'auto' posture refines its neutral from the smoothed pose ~700ms
-  // after tilt engages, so read the LIVE neutral before each assertion instead
-  // of caching it — the refinement is the feature, not drift.
-  await settle(input._beta0);
+  await settle(32);
   const idle = Math.abs(input.moveX) + Math.abs(input.moveY);
-  check(idle < 0.05, `holding the current pose does not drive the tank (${idle.toFixed(3)})`);
+  check(idle < 0.05, `holding the fixed pose does not drive the tank (${idle.toFixed(3)})`);
+
+  // A different first/held pose must produce input instead of silently becoming
+  // a new neutral. It also must not alter the stored fixed reference over time.
+  await settle(24);
+  check(input.moveY < -0.7,
+    `a pose below the fixed angle steers instead of recalibrating (moveY=${input.moveY.toFixed(2)})`);
+  await sleep(750);
+  check(input._beta0 === 32 && input._gamma0 === 0,
+    `neutral remains fixed after startup settles (${input._beta0},${input._gamma0})`);
 
   // ...and tilting past the range drives it at full speed.
-  await settle(input._beta0 + 20);
+  await settle(52);
   check(input.moveY > 0.9,
     `tilting past the range drives at full speed (moveY=${input.moveY.toFixed(2)})`);
-  await settle(input._beta0 - 20);
+  await settle(12);
   check(input.moveY < -0.9, `tilting the other way reverses it (moveY=${input.moveY.toFixed(2)})`);
 
   // ---- tilt must engage with NO gesture whatsoever ----
@@ -1158,6 +1169,8 @@ async function checkTilt() {
   emit(24, 0);
   check(auto.tiltReady === true, 'a sensor reading with NO gesture still readies tilt');
   check(auto.mode === 'tilt', 'and tilt takes over without the player tapping anything');
+  check(auto._beta0 === 32,
+    `a different launch pose still uses the same fixed neutral (${auto._beta0})`);
 
   // ---- a joystick CHOICE sticks, and a sensor reading never overrides it ----
   auto.setMode('stick', { persist: true });
@@ -1181,8 +1194,11 @@ async function checkTilt() {
   // neither force the joystick nor count as a tilt choice.
   store.clear();
   store.set('tank.tilt', '0');
+  store.set('tank.tiltPose', 'auto');
+  store.set('tank.tiltBeta', '71');
   const legacy = new Input(el());
   check(legacy.prefersTilt === true, 'the legacy tank.tilt key is ignored — the touch default (tilt) applies');
+  check(legacy.tiltPreset === 'angled', 'legacy auto/custom calibration values migrate to the fixed Angled preset');
 
   // ...but where iOS's gate exists, a gesture genuinely is required, and the
   // first tap is reserved for the modal rather than being spent as a shot.

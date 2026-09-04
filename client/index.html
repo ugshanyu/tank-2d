@@ -30,9 +30,6 @@
      it cost a permanent panel over the top-right of the arena. Connection trouble
      is surfaced by the #offline overlay instead, which is unmissable. */
   #status { display: none !important; }
-  /* Hidden: it duplicated the settings sheet's "Level now" row while sitting in
-     the joystick zone, so resting a driving thumb re-levelled tilt mid-drive. */
-  #calibrate { display: none !important; }
   /* kill feed — a 2v2 had no readable narrative; you never saw who killed whom */
   #feed { position: absolute; top: calc(var(--sat) + 10px); right: calc(var(--sar) + 12px);
     display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
@@ -232,7 +229,6 @@
   <div id="feed"></div>
   <div id="killbanner"></div>
   <div id="toast"></div>
-  <button id="calibrate">⟳ level tilt</button>
   <button id="gear" class="icon-btn" aria-label="Settings">⚙</button>
 </div>
 
@@ -265,7 +261,6 @@
         <button id="shake2">Full</button>
       </span>
     </div>
-    <div class="row"><span>Re-centre tilt</span><button id="optCal">Level now</button></div>
     <div class="row"><span>How to play</span><button id="optHelp">Show</button></div>
     <button class="close" id="sheetClose">DONE</button>
   </div>

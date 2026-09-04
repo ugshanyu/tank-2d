@@ -44,11 +44,10 @@ export class Input {
     // or unless the player picks it in Settings, and a choice sticks across
     // launches. Nothing about steering is written to storage until they choose.
     this.prefersTilt = this.isTouch;
-    // Default posture: 'auto' — neutral is sampled from HOWEVER the player is
-    // holding the phone when tilt engages, so their current angle IS level. The
-    // named presets remain as explicit choices in settings and, once chosen,
-    // stick across launches.
-    this.tiltPreset = 'auto';
+    // A launch must never redefine neutral from the pose the player happened to
+    // be holding. Use the same fixed, comfortable reference on every launch;
+    // the other fixed posture presets remain explicit choices in Settings.
+    this.tiltPreset = 'angled';
     this.suppressNextPointer = false;  // the permission-granting tap is not a shot
     try {
       // Only an EXPLICIT choice is remembered (setMode's `persist`). The legacy
@@ -58,11 +57,9 @@ export class Input {
       if (steer === 'tilt') this.prefersTilt = true;
       else if (steer === 'stick') this.prefersTilt = false;
       const pose = localStorage.getItem('tank.tiltPose');
-      // A stored 'custom' is only meaningful with the angle that went with it;
-      // without one, applyTiltPreset would fail and we'd fall back to sampling.
-      this._customBeta = Number(localStorage.getItem('tank.tiltBeta'));
-      this.tiltPreset = (pose === 'custom' && Number.isFinite(this._customBeta)) ? 'custom'
-        : (TILT_PRESETS[pose] !== undefined ? pose : 'auto');
+      // Old 'auto' and 'custom' values were pose-derived and therefore changed
+      // the controls between launches. Migrate both to the fixed default.
+      this.tiltPreset = TILT_PRESETS[pose] !== undefined ? pose : 'angled';
     } catch { /* private mode */ }
     this.moveX = 0;
     this.moveY = 0;
@@ -71,7 +68,7 @@ export class Input {
     this.hasAim = false;
 
     // tilt
-    this._beta0 = null;                // calibrated neutral
+    this._beta0 = null;                // fixed neutral from TILT_PRESETS
     this._gamma0 = null;
     this._beta = null;
     this._gamma = null;
@@ -114,13 +111,6 @@ export class Input {
       this._beta = e.beta;
       this._gamma = e.gamma;
       if (this._sBeta === null) { this._sBeta = e.beta; this._sGamma = e.gamma; }
-      // pose left the stability window before the auto-level refinement fired:
-      // the provisional neutral stands, the pending refinement is abandoned
-      if (this._autoArmed
-          && (Math.abs(wrapDeg(e.beta - this._beta0)) > 12
-            || Math.abs(wrapDeg(e.gamma - this._gamma0)) > 12)) {
-        this._autoArmed = false;
-      }
       if (this.tiltReady) return;
       // First real reading, whenever it lands.
       this.tiltReady = true;
@@ -128,30 +118,6 @@ export class Input {
       if (this.prefersTilt) this.setMode('tilt');
       if (this.onTiltReady) this.onTiltReady();
     });
-  }
-
-  // 'auto' neutral: the pose the player is holding right now IS level. The first
-  // reading often lands while the thumb is still on the permission dialog and the
-  // phone is mid-wobble, so take a provisional neutral immediately (the tank must
-  // not drive off on its own) and refine from the SMOOTHED pose a moment later.
-  // Deliberately not persisted: every launch re-levels to however you sit today.
-  _autoLevel() {
-    if (this._beta === null) return;
-    this._beta0 = this._sBeta ?? this._beta;
-    this._gamma0 = this._sGamma ?? this._gamma;
-    // Refine once the pose settles — but the moment it leaves the stability
-    // window the refinement is CANCELLED for good (see the listener check):
-    // the player is steering, and re-levelling then would yank the stick from
-    // whatever pose the timer happened to catch mid-motion.
-    this._autoArmed = true;
-    clearTimeout(this._autoTimer);
-    this._autoTimer = setTimeout(() => {
-      if (this._autoArmed && this.tiltPreset === 'auto' && this._sBeta !== null) {
-        this._beta0 = this._sBeta;
-        this._gamma0 = this._sGamma;
-      }
-      this._autoArmed = false;
-    }, 700);
   }
 
   // Must be called from a user gesture (button tap).
@@ -211,11 +177,8 @@ export class Input {
     this.mode = mode;
     this.joy = null;
     this.moveX = 0; this.moveY = 0;
-    // Re-apply the chosen POSTURE, never re-sample the current pose. calibrate()
-    // here was clobbering the preset the caller had just set — and on iOS the
-    // sample was taken while the player was still tapping the permission dialog,
-    // which is the precise failure this whole preset system exists to avoid.
-    if (mode === 'tilt' && this.tiltPreset !== 'custom') this.applyTiltPreset(this.tiltPreset);
+    // Re-apply the fixed posture, never sample the current phone pose.
+    if (mode === 'tilt') this.applyTiltPreset(this.tiltPreset);
     return true;
   }
 
@@ -227,44 +190,16 @@ export class Input {
     this.firing = false;
   }
 
-  // 'auto' (the default) levels to the current pose; the named postures are
-  // explicit choices that stick across launches for players who want a fixed
-  // reference that survives shifting position.
+  // Every posture is an absolute reference that survives launches and shifting
+  // position. An unknown/legacy value always returns to the fixed default.
   applyTiltPreset(name) {
-    if (name === 'auto') {
-      this.tiltPreset = 'auto';
-      this._autoLevel();
-      try { localStorage.setItem('tank.tiltPose', 'auto'); } catch { /* ignore */ }
-      return true;
-    }
-    if (name === 'custom' && Number.isFinite(this._customBeta)) {
-      this.tiltPreset = 'custom';
-      this._beta0 = this._customBeta;
-      this._gamma0 = this._customGamma || 0;
-      return true;
-    }
-    const beta = TILT_PRESETS[name];
-    if (beta === undefined) return this.applyTiltPreset('auto');
-    this.tiltPreset = name;
+    const preset = TILT_PRESETS[name] === undefined ? 'angled' : name;
+    const beta = TILT_PRESETS[preset];
+    this.tiltPreset = preset;
     this._beta0 = beta;
     this._gamma0 = 0;
-    try { localStorage.setItem('tank.tiltPose', name); } catch { /* ignore */ }
+    try { localStorage.setItem('tank.tiltPose', preset); } catch { /* ignore */ }
     return true;
-  }
-
-  // Manual "Level now": whatever pose you are in right now becomes neutral.
-  calibrate() {
-    if (this._beta !== null) {
-      this._beta0 = this._sBeta ?? this._beta;
-      this._gamma0 = this._sGamma ?? this._gamma;
-      this._customBeta = this._beta0;
-      this._customGamma = this._gamma0;
-      this.tiltPreset = 'custom';
-      try {
-        localStorage.setItem('tank.tiltPose', 'custom');
-        localStorage.setItem('tank.tiltBeta', String(this._beta0));
-      } catch { /* ignore */ }
-    }
   }
 
   _screenAngle() {
@@ -399,21 +334,6 @@ export class Input {
     c.addEventListener('pointerup', release);
     c.addEventListener('pointercancel', release);
     c.addEventListener('lostpointercapture', release);
-
-    // Only a CUSTOM neutral is pose-dependent; the presets are absolute, and
-    // silently re-sampling neutral on a rotation is precisely the auto-calibration
-    // that gets reported as "the calibration is royally screwed up".
-    const onOrient = () => setTimeout(() => {
-      // pose-derived neutrals must re-sample after a rotation flips the axes;
-      // the absolute presets are orientation-mapped in poll() and need nothing
-      if (this.tiltPreset === 'custom') this.calibrate();
-      else if (this.tiltPreset === 'auto') this._autoLevel();
-    }, 700);
-    if (screen.orientation && screen.orientation.addEventListener) {
-      screen.orientation.addEventListener('change', onOrient);
-    } else {
-      window.addEventListener('orientationchange', onOrient);
-    }
 
     // `code` is deliberately primary: it is the PHYSICAL key position, so WASD
     // stays under the same fingers on AZERTY/QWERTZ where `key` would report z/q.
